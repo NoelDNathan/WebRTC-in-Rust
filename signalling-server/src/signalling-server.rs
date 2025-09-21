@@ -18,6 +18,9 @@ use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use simplelog::{CombinedLogger, LevelFilter, TermLogger, TerminalMode, WriteLogger};
 
+use async_tungstenite::tungstenite::handshake::server::{Request, Response};
+use async_tungstenite::tungstenite::http::HeaderValue;
+
 type Tx = UnboundedSender<Message>;
 type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
 type UserList = Arc<Mutex<HashMap<UserID, SocketAddr>>>;
@@ -35,13 +38,11 @@ struct SessionMembers {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Setup Logging
 fn setup_logging() -> Result<(), SetLoggerError> {
-    CombinedLogger::init(vec![
-        TermLogger::new(
-            LevelFilter::Info,
-            simplelog::Config::default(),
-            TerminalMode::Mixed,
-        ),
-    ])
+    CombinedLogger::init(vec![TermLogger::new(
+        LevelFilter::Info,
+        simplelog::Config::default(),
+        TerminalMode::Mixed,
+    )])
 }
 
 // Get Server IP
@@ -466,9 +467,19 @@ async fn handle_connection(
 ) {
     info!("Incoming TCP connection from: {}", addr);
 
-    let ws_stream = async_tungstenite::accept_async(raw_stream)
+    // Agregar callback para CORS headers
+    let callback = |_req: &Request, mut response: Response| {
+        let headers = response.headers_mut();
+        headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
+        headers.insert("Access-Control-Allow-Methods", HeaderValue::from_static("GET, POST, OPTIONS"));
+        headers.insert("Access-Control-Allow-Headers", HeaderValue::from_static("Content-Type"));
+        Ok(response)
+    };
+
+    let ws_stream = async_tungstenite::accept_hdr_async(raw_stream, callback)
         .await
         .expect("Error during the websocket handshake occurred");
+    
     info!("WebSocket connection established: {}", addr);
 
     // Insert the write part of this peer to the peer map.
@@ -561,17 +572,17 @@ async fn run() -> Result<(), IoError> {
     let session_list = SessionList::new(Mutex::new(HashMap::new()));
     let peer_map = PeerMap::new(Mutex::new(HashMap::new()));
 
-    // Usar variable de entorno PORT o fallback a 2794
+    // Usar variable de entorno PORT (Render la proporciona automáticamente)
     let port = std::env::var("PORT").unwrap_or_else(|_| "2794".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
-
-    info!("Starting server on {}", bind_addr);
+    
+    info!("Starting signalling server on {}", bind_addr);
 
     // Create the event loop and TCP listener we'll accept connections on.
     let try_socket = TcpListener::bind(&bind_addr).await;
 
     let listener = try_socket.expect("Failed to bind");
-    info!("Server listening on {}", bind_addr);
+    info!("Signalling server listening on {}", bind_addr);
 
     // Let's spawn the handling of each connection in a separate Async task.
     while let Ok((stream, addr)) = listener.accept().await {

@@ -13,8 +13,24 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = window)]
-    static CONFIG: JsValue;
+    #[wasm_bindgen(js_namespace = ["window", "location"], js_name = hostname)]
+    fn hostname() -> String;
+}
+
+// Función para obtener la URL del WebSocket según el entorno
+fn get_websocket_url() -> String {
+    let hostname = hostname();
+
+    if hostname.contains("github.io") {
+        // Producción en GitHub Pages - conecta a Render
+        "wss://webrtc-in-rust.onrender.com".to_string()
+    } else if hostname == "localhost" || hostname == "127.0.0.1" {
+        // Desarrollo local
+        "ws://127.0.0.1:2794".to_string()
+    } else {
+        // Fallback a producción
+        "wss://webrtc-in-rust.onrender.com".to_string()
+    }
 }
 
 // From Workspace
@@ -31,22 +47,16 @@ const WS_IP_PORT: &str = "ws://127.0.0.1:2794";
 
 pub async fn open_web_socket(
     rtc_conn: RtcPeerConnection,
-    rc_state: Rc<RefCell<AppState>>,
+    state: Rc<RefCell<AppState>>,
 ) -> Result<WebSocket, JsValue> {
-    // Obtener configuración desde JavaScript
-    let ws_url = web_sys::window()
-        .unwrap()
-        .get("WS_SERVER_URL")
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| "ws://127.0.0.1:2794".to_string());
-
-    info!("Opening WS Connection to: {}", ws_url);
+    let ws_url = get_websocket_url();
+    info!("Connecting to WebSocket: {}", ws_url);
 
     let ws = WebSocket::new(&ws_url)?;
 
     ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
     let cloned_ws_ext = ws.clone();
-    let cloned_state_ext = rc_state;
+    let cloned_state_ext = state;
     //  ON MESSAGE CALLBACK
     let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
         if let Ok(array_buffer) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
