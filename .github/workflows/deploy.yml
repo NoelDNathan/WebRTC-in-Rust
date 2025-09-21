@@ -34,20 +34,20 @@ jobs:
 
       - name: Prepare deployment files
         run: |
-          echo "=== Verificando archivos antes de copiar ==="
-          ls -la wasm_client/
-          echo "=== Contenido de pkg ==="
-          ls -la wasm_client/pkg/
-          echo "=== Creando dist y copiando archivos ==="
-          mkdir -p dist
+          echo "=== Creando dist limpio ==="
+          rm -rf dist
+          mkdir -p dist/pkg
+          
+          # Copiar archivos específicos sin .gitignore
           cp wasm_client/index.html dist/
-          cp -r wasm_client/pkg dist/
-          echo "=== VERIFICANDO PERMISOS Y ESTRUCTURA ==="
-          ls -laR dist/
-          echo "=== CONTANDO ARCHIVOS ==="
-          find dist -type f | wc -l
-          echo "=== LISTANDO TODOS LOS ARCHIVOS ==="
-          find dist -type f
+          cp wasm_client/pkg/*.js dist/pkg/
+          cp wasm_client/pkg/*.wasm dist/pkg/
+          cp wasm_client/pkg/*.d.ts dist/pkg/
+          cp wasm_client/pkg/package.json dist/pkg/
+          
+          echo "=== Archivos copiados ==="
+          find dist -type f -ls
+          echo "=== Total: $(find dist -type f | wc -l) archivos ==="
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         if: github.ref == 'refs/heads/master'
