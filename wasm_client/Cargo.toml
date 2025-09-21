@@ -55,6 +55,7 @@ features = [
   "RtcIceServer",
   "MediaDevices",
   "Window", 
+  "Location",
   "Document",
   "MediaStream",
   "Element",

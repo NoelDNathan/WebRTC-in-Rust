@@ -19,7 +19,9 @@ extern "C" {
 
 // Función para obtener la URL del WebSocket según el entorno
 fn get_websocket_url() -> String {
-    let hostname = hostname();
+    let window = web_sys::window().expect("window should be available");
+    let location = window.location();
+    let hostname = location.hostname().expect("hostname should be available");
 
     if hostname.contains("github.io") {
         // Producción en GitHub Pages - conecta a Render
