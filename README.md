@@ -1,4 +1,4 @@
-# WebRTC Tutorial in Rust+WASM !
+# WebRTC Tutorial in Rust+WASM (patata) !
 
 <!-- ![Ferris](Crustacean_over_ip.png) -->
 <h1 align="center">
