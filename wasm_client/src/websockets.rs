@@ -8,6 +8,15 @@ use web_sys::{Document, ErrorEvent, HtmlLabelElement, MessageEvent, RtcPeerConne
 
 use crate::common::{handle_message_reply, AppState};
 
+// En lugar de hardcodear, obtener de configuración
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = window)]
+    static CONFIG: JsValue;
+}
+
 // From Workspace
 
 // __          __         _          _____                  _             _
@@ -24,9 +33,16 @@ pub async fn open_web_socket(
     rtc_conn: RtcPeerConnection,
     rc_state: Rc<RefCell<AppState>>,
 ) -> Result<WebSocket, JsValue> {
-    info!("Opening WS Connection");
+    // Obtener configuración desde JavaScript
+    let ws_url = web_sys::window()
+        .unwrap()
+        .get("WS_SERVER_URL")
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "ws://127.0.0.1:2794".to_string());
 
-    let ws = WebSocket::new(WS_IP_PORT)?;
+    info!("Opening WS Connection to: {}", ws_url);
+
+    let ws = WebSocket::new(&ws_url)?;
 
     ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
     let cloned_ws_ext = ws.clone();
@@ -86,7 +102,7 @@ pub async fn open_web_socket(
             .set_text_content(Some(&format!(
                 "{} {} ?",
                 "Could not make Websocket Connection, Is the Signalling Server running on: ",
-                WS_IP_PORT
+                ws_url
             )));
     }) as Box<dyn FnMut(ErrorEvent)>);
     ws.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));

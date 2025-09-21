@@ -1,0 +1,39 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: wasm32-unknown-unknown
+        
+    - name: Install wasm-pack
+      run: cargo install wasm-pack
+      
+    - name: Build WASM
+      run: |
+        cd wasm_client
+        wasm-pack build --target web --out-name wasm_client --release
+        
+    - name: Prepare GitHub Pages
+      run: |
+        mkdir -p docs
+        cp wasm_client/index.html docs/
+        cp -r wasm_client/pkg docs/
+        
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./docs
