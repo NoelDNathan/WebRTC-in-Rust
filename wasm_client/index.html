@@ -138,8 +138,8 @@
         const isGitHubPages = window.location.hostname.includes('github.io');
         const basePath = isGitHubPages ? '/WebRTC-in-Rust' : '';
         
-        import init from `${basePath}/pkg/wasm_client.js`;
-        init(`${basePath}/pkg/wasm_client_bg.wasm`);
+        import init from basePath + '/pkg/wasm_client.js';
+        init(basePath + '/pkg/wasm_client_bg.wasm');
     </script>
 </body>
 

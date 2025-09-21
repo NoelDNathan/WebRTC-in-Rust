@@ -471,15 +471,21 @@ async fn handle_connection(
     let callback = |_req: &Request, mut response: Response| {
         let headers = response.headers_mut();
         headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
-        headers.insert("Access-Control-Allow-Methods", HeaderValue::from_static("GET, POST, OPTIONS"));
-        headers.insert("Access-Control-Allow-Headers", HeaderValue::from_static("Content-Type"));
+        headers.insert(
+            "Access-Control-Allow-Methods",
+            HeaderValue::from_static("GET, POST, OPTIONS"),
+        );
+        headers.insert(
+            "Access-Control-Allow-Headers",
+            HeaderValue::from_static("Content-Type"),
+        );
         Ok(response)
     };
 
     let ws_stream = async_tungstenite::accept_hdr_async(raw_stream, callback)
         .await
         .expect("Error during the websocket handshake occurred");
-    
+
     info!("WebSocket connection established: {}", addr);
 
     // Insert the write part of this peer to the peer map.
@@ -575,7 +581,7 @@ async fn run() -> Result<(), IoError> {
     // Usar variable de entorno PORT (Render la proporciona automáticamente)
     let port = std::env::var("PORT").unwrap_or_else(|_| "2794".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
-    
+
     info!("Starting signalling server on {}", bind_addr);
 
     // Create the event loop and TCP listener we'll accept connections on.
