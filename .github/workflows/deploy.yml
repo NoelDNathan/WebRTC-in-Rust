@@ -41,9 +41,11 @@ jobs:
           echo "=== Creando dist y copiando archivos ==="
           mkdir -p dist
           cp wasm_client/index.html dist/
-          cp -r wasm_client/pkg/* dist/
+          cp -r wasm_client/pkg dist/
           echo "=== Archivos en dist después de copiar ==="
           ls -la dist/
+          echo "=== Contenido de dist/pkg ==="
+          ls -la dist/pkg/
           echo "=== Verificando que index.html tenga contenido ==="
           head -5 dist/index.html
       - name: Deploy to GitHub Pages
