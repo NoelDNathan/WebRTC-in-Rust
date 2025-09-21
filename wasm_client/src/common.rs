@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 use std::rc::Rc;
 
-
 use js_sys::{Array, Object, Promise, Reflect};
 use log::{debug, error, info, warn};
 use wasm_bindgen::closure::Closure;
@@ -10,8 +9,8 @@ use wasm_bindgen::{JsCast, JsValue, UnwrapThrowExt};
 use web_sys::{
     Document, Element, HtmlButtonElement, HtmlInputElement, HtmlLabelElement, HtmlVideoElement,
     MediaStream, MediaStreamConstraints, MessageEvent, RtcConfiguration, RtcDataChannel,
-    RtcDataChannelEvent, RtcIceConnectionState, RtcPeerConnection, WebSocket,
-    RtcIceCredentialType, RtcIceServer, RtcIceTransportPolicy,
+    RtcDataChannelEvent, RtcIceConnectionState, RtcIceCredentialType, RtcIceServer,
+    RtcIceTransportPolicy, RtcPeerConnection, WebSocket,
 };
 
 use shared_protocol::{SessionID, SignalEnum, UserID};
@@ -64,25 +63,24 @@ pub fn create_plain_peer_connection() -> Result<RtcPeerConnection, JsValue> {
 }
 
 pub fn create_turn_peer_connection() -> Result<RtcPeerConnection, JsValue> {
-    
-    // STUN HERE 
+    // STUN HERE
     let mut stun_server = RtcIceServer::new();
     stun_server.url(&STUN_SERVER);
 
     // TURN SERVER
-    let turn_url = format!("{}",TURN);
+    let turn_url = format!("{}", TURN);
     warn!("Turn URL: {}", TURN);
     let mut turn_server = RtcIceServer::new();
     turn_server.url(&turn_url);
-    let r_num= f64::ceil(js_sys::Math::random()*10.0) ;
+    let r_num = f64::ceil(js_sys::Math::random() * 10.0);
     let r_num2 = r_num as u8;
 
     // Both users can have the same username + password,
     // The turn server doesnt really care
-    let user = format!("user{}",r_num2);
-    let pass = format!("pass{}",r_num2);
+    let user = format!("user{}", r_num2);
+    let pass = format!("pass{}", r_num2);
 
-    info!("{}",format!("Creds: user:{} pass:{}",user, pass));
+    info!("{}", format!("Creds: user:{} pass:{}", user, pass));
     turn_server.username(&user);
     turn_server.credential(&pass);
 
@@ -92,7 +90,7 @@ pub fn create_turn_peer_connection() -> Result<RtcPeerConnection, JsValue> {
     let mut rtc_config = RtcConfiguration::new();
     // let arr_ice_svr = Array::of2(turn_server_ref,stun_server_ref);
     let arr_ice_svr = Array::of1(turn_server_ref);
-    warn!("ICE server Length {}",arr_ice_svr.length());
+    warn!("ICE server Length {}", arr_ice_svr.length());
     let arr_ice_svr_ref: &JsValue = arr_ice_svr.as_ref();
     rtc_config.ice_servers(arr_ice_svr_ref);
 
@@ -100,11 +98,10 @@ pub fn create_turn_peer_connection() -> Result<RtcPeerConnection, JsValue> {
     // warn!("All transport");
     // let transport_policy = RtcIceTransportPolicy::All;
     let transport_policy = RtcIceTransportPolicy::Relay;
-    warn!("ICE transport {:?}",transport_policy);
+    warn!("ICE transport {:?}", transport_policy);
     rtc_config.ice_transport_policy(transport_policy); // This is to force use of a TURN Server
 
     RtcPeerConnection::new_with_configuration(&rtc_config)
-
 }
 
 pub fn create_stun_peer_connection() -> Result<RtcPeerConnection, JsValue> {
@@ -199,6 +196,12 @@ pub async fn handle_message_reply(
         }
         SignalEnum::ICEError(err, session_id) => {
             error!("ICEError! {}, {} ", err, session_id.inner());
+        }
+        SignalEnum::TextMessage(data, session_id) => {
+            if let Ok(text) = String::from_utf8(data) {
+                info!("Received text message: {}", text);
+                // Procesar el mensaje de texto
+            }
         }
         remaining => {
             error!("Frontend should not receive {:?}", remaining);
@@ -396,12 +399,13 @@ pub async fn setup_listener(
         // }
 
         wasm_bindgen_futures::spawn_local(async move {
-            let res = setup_rtc_peer_connection_ice_callbacks(peer_b_clone, ws_clone1, rc_state_clone).await;
-                if res.is_err() {
-                    log::error!("Error Setting up ice callbacks {:?}", res.unwrap_err())
-                }
+            let res =
+                setup_rtc_peer_connection_ice_callbacks(peer_b_clone, ws_clone1, rc_state_clone)
+                    .await;
+            if res.is_err() {
+                log::error!("Error Setting up ice callbacks {:?}", res.unwrap_err())
+            }
         });
-
 
         host_session(ws_clone);
     }) as Box<dyn FnMut()>);
@@ -487,12 +491,13 @@ pub async fn setup_initiator(
 
         let ws_clone1 = ws_clone.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let res = setup_rtc_peer_connection_ice_callbacks(peer_a_clone, ws_clone1, rc_state_clone).await;
-                if res.is_err() {
-                    log::error!("Error Setting up ice callbacks {:?}", res.unwrap_err())
-                }
+            let res =
+                setup_rtc_peer_connection_ice_callbacks(peer_a_clone, ws_clone1, rc_state_clone)
+                    .await;
+            if res.is_err() {
+                log::error!("Error Setting up ice callbacks {:?}", res.unwrap_err())
+            }
         });
-
 
         try_connect_to_session(ws_clone);
     }) as Box<dyn FnMut()>);

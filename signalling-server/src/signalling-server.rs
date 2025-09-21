@@ -269,6 +269,18 @@ fn handle_message(
             }
             (message, Destination::SourcePeer)
         }
+        SignalEnum::TextMessage(data, session_id) => {
+            // Lógica para reenviar el mensaje de texto al peer correspondiente
+            let message_json =
+                match serde_json::to_string(&SignalEnum::TextMessage(data, session_id)) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        let e_msg = format!("Could not Serialize TextMessage, {:?}", e);
+                        return Err(e_msg);
+                    }
+                };
+            (message_json, Destination::SourcePeer)
+        }
         ///////////////////////////////////
         SignalEnum::SessionJoin(session_id) => {
             debug!("inside Session Join ");

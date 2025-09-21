@@ -38,6 +38,7 @@ impl UserID {
 pub enum SignalEnum {
     // Return called by the server as soon as the user connects
     NewUser(UserID),
+    TextMessage(Vec<u8>, SessionID),
 
     // To manage a live session between two users
     SessionNew,
