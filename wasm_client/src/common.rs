@@ -7,9 +7,9 @@ use log::{debug, error, info, warn};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue, UnwrapThrowExt};
 use web_sys::{
-    Document, Element, HtmlButtonElement, HtmlInputElement, HtmlLabelElement, HtmlVideoElement,
-    MediaStream, MediaStreamConstraints, MessageEvent, RtcConfiguration, RtcDataChannel,
-    RtcDataChannelEvent, RtcIceConnectionState, RtcIceCredentialType, RtcIceServer,
+    Document, Element, Event, HtmlButtonElement, HtmlInputElement, HtmlLabelElement,
+    HtmlVideoElement, MediaStream, MediaStreamConstraints, MessageEvent, RtcConfiguration,
+    RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState, RtcIceCredentialType, RtcIceServer,
     RtcIceTransportPolicy, RtcPeerConnection, WebSocket,
 };
 
@@ -163,7 +163,10 @@ pub async fn handle_message_reply(
             info!("SessionReady Received ! {:?}", session_id);
             let mut state = app_state.borrow_mut();
             state.set_session_id(session_id.clone());
+            drop(state);
             set_html_label("sessionid_lbl", session_id.inner());
+            enable_chat_input();
+            add_message_to_chat("Session created. Waiting for peer to join...");
         }
         SignalEnum::SessionJoinSuccess(session_id) => {
             info!("SessionJoinSuccess {}", session_id.clone().inner());
@@ -181,6 +184,8 @@ pub async fn handle_message_reply(
             let full_string = format!("Connecting to Session: {}", session_id.inner());
             set_html_label("session_connection_status", full_string);
             set_html_label("sessionid_heading", "".into());
+            enable_chat_input();
+            add_message_to_chat("Connected to session. You can now send messages!");
         }
         SignalEnum::SessionJoinError(session_id) => {
             error!("SessionJoinError! {}", session_id.clone().inner());
@@ -200,7 +205,9 @@ pub async fn handle_message_reply(
         SignalEnum::TextMessage(data, session_id) => {
             if let Ok(text) = String::from_utf8(data) {
                 info!("Received text message: {}", text);
-                // Procesar el mensaje de texto
+                add_message_to_chat(&format!("Peer: {}", text));
+            } else {
+                error!("Received invalid UTF-8 text message");
             }
         }
         remaining => {
@@ -650,6 +657,156 @@ async fn send_video_offer(rtc_conn: RtcPeerConnection, ws: WebSocket, session_id
         Ok(_) => {}
         Err(e) => {
             error!("Error Sending Video Offer {:?}", e);
+        }
+    }
+}
+
+pub fn setup_chat_functionality(
+    websocket: WebSocket,
+    rc_state: Rc<RefCell<AppState>>,
+) -> Result<(), JsValue> {
+    let window = web_sys::window().expect("No window Found");
+    let document: Document = window.document().expect("Couldn't Get Document");
+
+    // Setup send message button
+    let ws_clone = websocket.clone();
+    let rc_state_clone = rc_state.clone();
+    let send_btn_callback = Closure::wrap(Box::new(move || {
+        send_text_message(ws_clone.clone(), rc_state_clone.clone());
+    }) as Box<dyn FnMut()>);
+
+    document
+        .get_element_by_id("send_message")
+        .expect("should have send_message button on the page")
+        .dyn_ref::<HtmlButtonElement>()
+        .expect("send_message should be an HtmlButtonElement")
+        .set_onclick(Some(send_btn_callback.as_ref().unchecked_ref()));
+    send_btn_callback.forget();
+
+    Ok(())
+}
+
+fn send_text_message(ws: WebSocket, rc_state: Rc<RefCell<AppState>>) {
+    let window = web_sys::window().expect("No window Found");
+    let document: Document = window.document().expect("Couldn't Get Document");
+
+    let chat_input_element = document
+        .get_element_by_id("chat_input")
+        .expect("should have chat_input on the page");
+
+    let chat_input = chat_input_element
+        .dyn_ref::<HtmlInputElement>()
+        .expect("chat_input should be an HtmlInputElement");
+
+    let message_text = chat_input.value().trim().to_string();
+
+    if message_text.is_empty() {
+        return;
+    }
+
+    let state = rc_state.borrow();
+    let session_id = match state.get_session_id_ref() {
+        Some(sid) => sid.clone(),
+        None => {
+            error!("Cannot send message: No session ID available");
+            return;
+        }
+    };
+    drop(state);
+
+    // Create and send the text message
+    let message_bytes = message_text.as_bytes().to_vec();
+    let signal = SignalEnum::TextMessage(message_bytes, session_id);
+
+    let serialized_msg = match serde_json_wasm::to_string(&signal) {
+        Ok(msg) => msg,
+        Err(e) => {
+            error!("Could not serialize text message: {}", e);
+            return;
+        }
+    };
+
+    match ws.send_with_str(&serialized_msg) {
+        Ok(_) => {
+            info!("Text message sent: {}", message_text);
+            // Clear the input field
+            chat_input.set_value("");
+            // Add message to our own chat display
+            add_message_to_chat(&format!("You: {}", message_text));
+        }
+        Err(e) => {
+            error!("Error sending text message: {:?}", e);
+        }
+    }
+}
+
+pub fn add_message_to_chat(message: &str) {
+    let window = web_sys::window().expect("No window Found");
+    let document: Document = window.document().expect("Couldn't Get Document");
+
+    let chat_messages = document
+        .get_element_by_id("chat_messages")
+        .expect("should have chat_messages on the page");
+
+    // Create timestamp
+    let now = js_sys::Date::new_0();
+    let timestamp = format!(
+        "{:02}:{:02}:{:02}",
+        now.get_hours(),
+        now.get_minutes(),
+        now.get_seconds()
+    );
+
+    // Create message element
+    let message_div = document.create_element("div").unwrap();
+    message_div.set_class_name("message-item");
+
+    let timestamp_span = document.create_element("span").unwrap();
+    timestamp_span.set_class_name("message-timestamp");
+    timestamp_span.set_text_content(Some(&format!("[{}] ", timestamp)));
+
+    let content_span = document.create_element("span").unwrap();
+    content_span.set_class_name("message-content");
+    content_span.set_text_content(Some(message));
+
+    message_div.append_child(&timestamp_span).unwrap();
+    message_div.append_child(&content_span).unwrap();
+    chat_messages.append_child(&message_div).unwrap();
+
+    // Auto-scroll to bottom
+    chat_messages.set_scroll_top(chat_messages.scroll_height());
+}
+
+pub fn enable_chat_input() {
+    let window = web_sys::window().expect("No window Found");
+    let document: Document = window.document().expect("Couldn't Get Document");
+
+    if let Some(chat_input) = document.get_element_by_id("chat_input") {
+        if let Ok(input_element) = chat_input.dyn_into::<HtmlInputElement>() {
+            input_element.set_disabled(false);
+        }
+    }
+
+    if let Some(send_button) = document.get_element_by_id("send_message") {
+        if let Ok(button_element) = send_button.dyn_into::<HtmlButtonElement>() {
+            button_element.set_disabled(false);
+        }
+    }
+}
+
+pub fn disable_chat_input() {
+    let window = web_sys::window().expect("No window Found");
+    let document: Document = window.document().expect("Couldn't Get Document");
+
+    if let Some(chat_input) = document.get_element_by_id("chat_input") {
+        if let Ok(input_element) = chat_input.dyn_into::<HtmlInputElement>() {
+            input_element.set_disabled(true);
+        }
+    }
+
+    if let Some(send_button) = document.get_element_by_id("send_message") {
+        if let Ok(button_element) = send_button.dyn_into::<HtmlButtonElement>() {
+            button_element.set_disabled(true);
         }
     }
 }

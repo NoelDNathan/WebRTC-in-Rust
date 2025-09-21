@@ -270,6 +270,9 @@ fn handle_message(
             (message, Destination::SourcePeer)
         }
         SignalEnum::TextMessage(data, session_id) => {
+            // Clone session_id early to avoid move issues
+            let session_id_clone = session_id.clone();
+
             // Lógica para reenviar el mensaje de texto al peer correspondiente
             let message_json =
                 match serde_json::to_string(&SignalEnum::TextMessage(data, session_id)) {
@@ -279,7 +282,41 @@ fn handle_message(
                         return Err(e_msg);
                     }
                 };
-            (message_json, Destination::SourcePeer)
+
+            // Obtener los miembros de la sesión para determinar el destinatario
+            let session_list_lock = session_list.lock().unwrap();
+            let possible_session = session_list_lock.get(&session_id_clone);
+
+            let destination_peer = match possible_session {
+                None => {
+                    let emsg = String::from("TextMessage Error: Session not found");
+                    return Err(emsg);
+                }
+                Some(session_members) => {
+                    let opt_guest = session_members.guest.clone();
+                    let guest = match opt_guest {
+                        Some(guest) => guest,
+                        None => {
+                            let emsg = String::from("TextMessage Error: No guest in Session");
+                            return Err(emsg);
+                        }
+                    };
+
+                    let host = session_members.host.clone();
+
+                    // Determinar el peer de destino
+                    if user_id == guest {
+                        host
+                    } else if user_id == host {
+                        guest
+                    } else {
+                        let emsg = String::from("TextMessage Error: User not part of this session");
+                        return Err(emsg);
+                    }
+                }
+            };
+
+            (message_json, Destination::OtherPeer(destination_peer))
         }
         ///////////////////////////////////
         SignalEnum::SessionJoin(session_id) => {
