@@ -566,10 +566,17 @@ async fn run() -> Result<(), IoError> {
     let session_list = SessionList::new(Mutex::new(HashMap::new()));
     let peer_map = PeerMap::new(Mutex::new(HashMap::new()));
 
+    // Usar variable de entorno PORT o fallback a 2794
+    let port = std::env::var("PORT").unwrap_or_else(|_| "2794".to_string());
+    let bind_addr = format!("0.0.0.0:{}", port);
+
+    info!("Starting server on {}", bind_addr);
+
     // Create the event loop and TCP listener we'll accept connections on.
-    let try_socket = TcpListener::bind("0.0.0.0:2794").await;
+    let try_socket = TcpListener::bind(&bind_addr).await;
 
     let listener = try_socket.expect("Failed to bind");
+    info!("Server listening on {}", bind_addr);
 
     // Let's spawn the handling of each connection in a separate Async task.
     while let Ok((stream, addr)) = listener.accept().await {
