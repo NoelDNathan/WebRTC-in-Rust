@@ -42,15 +42,17 @@ jobs:
           mkdir -p dist
           cp wasm_client/index.html dist/
           cp -r wasm_client/pkg dist/
-          echo "=== Archivos en dist después de copiar ==="
-          ls -la dist/
-          echo "=== Contenido de dist/pkg ==="
-          ls -la dist/pkg/
-          echo "=== Verificando que index.html tenga contenido ==="
-          head -5 dist/index.html
+          echo "=== VERIFICANDO PERMISOS Y ESTRUCTURA ==="
+          ls -laR dist/
+          echo "=== CONTANDO ARCHIVOS ==="
+          find dist -type f | wc -l
+          echo "=== LISTANDO TODOS LOS ARCHIVOS ==="
+          find dist -type f
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         if: github.ref == 'refs/heads/master'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
+          force_orphan: true
+          enable_jekyll: false
