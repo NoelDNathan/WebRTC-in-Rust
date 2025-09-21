@@ -18,9 +18,13 @@ RUN apt-get update && apt-get install -y \
 # Copy the binary
 COPY --from=builder /app/target/release/signalling-server /usr/local/bin/signalling-server
 
-# Create a non-root user
-RUN useradd -m -u 1000 appuser
+# Create a non-root user and log directory
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/logs && \
+    chown appuser:appuser /app/logs
+
 USER appuser
+WORKDIR /app/logs
 
 EXPOSE 2794
 

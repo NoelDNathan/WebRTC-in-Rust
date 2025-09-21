@@ -24,7 +24,7 @@ type UserList = Arc<Mutex<HashMap<UserID, SocketAddr>>>;
 
 type SessionList = Arc<Mutex<HashMap<SessionID, SessionMembers>>>;
 
-const LOG_FILE: &str = "signalling_server_prototype.log";
+const LOG_FILE: &str = "/app/logs/signalling_server_prototype.log";
 
 #[derive(Debug, Clone)]
 struct SessionMembers {
@@ -37,14 +37,9 @@ struct SessionMembers {
 fn setup_logging() -> Result<(), SetLoggerError> {
     CombinedLogger::init(vec![
         TermLogger::new(
-            LevelFilter::Debug,
+            LevelFilter::Info,
             simplelog::Config::default(),
             TerminalMode::Mixed,
-        ),
-        WriteLogger::new(
-            LevelFilter::Debug,
-            simplelog::Config::default(),
-            File::create(LOG_FILE).unwrap(),
         ),
     ])
 }
