@@ -4,9 +4,8 @@ FROM rust:1.90 as builder
 WORKDIR /app
 COPY . .
 
-# Build the signalling server
-WORKDIR /app/signalling-server
-RUN cargo build --release
+# Build the signalling server from workspace root
+RUN cargo build --release --bin signalling-server
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -17,7 +16,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary
-COPY --from=builder /app/signalling-server/target/release/signalling-server /usr/local/bin/signalling-server
+COPY --from=builder /app/target/release/signalling-server /usr/local/bin/signalling-server
 
 # Create a non-root user
 RUN useradd -m -u 1000 appuser
