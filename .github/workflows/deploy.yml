@@ -37,14 +37,14 @@ jobs:
           echo "=== Creando dist limpio ==="
           rm -rf dist
           mkdir -p dist/pkg
-          
+
           # Copiar archivos específicos sin .gitignore
           cp wasm_client/index.html dist/
           cp wasm_client/pkg/*.js dist/pkg/
           cp wasm_client/pkg/*.wasm dist/pkg/
           cp wasm_client/pkg/*.d.ts dist/pkg/
           cp wasm_client/pkg/package.json dist/pkg/
-          
+
           echo "=== Archivos copiados ==="
           find dist -type f -ls
           echo "=== Total: $(find dist -type f | wc -l) archivos ==="
