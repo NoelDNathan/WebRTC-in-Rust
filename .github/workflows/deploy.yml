@@ -34,10 +34,18 @@ jobs:
 
       - name: Prepare deployment files
         run: |
+          echo "=== Verificando archivos antes de copiar ==="
+          ls -la wasm_client/
+          echo "=== Contenido de pkg ==="
+          ls -la wasm_client/pkg/
+          echo "=== Creando dist y copiando archivos ==="
           mkdir -p dist
           cp wasm_client/index.html dist/
-          cp -r wasm_client/pkg dist/
-
+          cp -r wasm_client/pkg/* dist/
+          echo "=== Archivos en dist después de copiar ==="
+          ls -la dist/
+          echo "=== Verificando que index.html tenga contenido ==="
+          head -5 dist/index.html
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         if: github.ref == 'refs/heads/master'
