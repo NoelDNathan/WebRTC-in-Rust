@@ -107,6 +107,23 @@
         <input type="text" id="sid_input" name="sid_input"/>
         <br><br>
 
+
+        <!-- Room Controls -->
+        <label id="sessionid_heading" style="color: rgb(145, 133, 197);">Room ID:</label>
+        <label class="sinulabel" id="sessionid_lbl"></label>
+        <br>
+        <label id="session_connection_status" style="color: rgb(255, 255, 255);"></label>
+        <label id="session_connection_status_error" style="color: rgb(207, 9, 9);"></label>
+
+        <h3><a title="Local Video" style="color: white;">Local Video</a></h3>
+        <video id="peer_a_video" width="320" height="240" style="color: white; outline-style: solid;" autoplay muted></video>
+        <br>
+
+        <button id="create_room" style="height:50px">Create Room</button>
+        <button id="join_room" style="height:50px">Join Room</button>
+        <input type="text" id="room_input" name="room_input" placeholder="Enter Room ID" />
+        <br><br>
+
         <!-- Chat Section -->
         <div class="chat-container">
             <h3 style="color: white; margin-top: 0;">Chat Messages</h3>

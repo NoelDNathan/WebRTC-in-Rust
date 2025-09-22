@@ -14,7 +14,7 @@ use wasm_bindgen::UnwrapThrowExt;
 use common::{
     create_plain_peer_connection, create_stun_peer_connection, create_turn_peer_connection,
     setup_chat_functionality, setup_initiator, setup_listener, setup_show_signalling_server_state,
-    setup_show_state, AppState,
+    setup_show_state, AppState, setup_room_ui,
 };
 use ice::{received_new_ice_candidate, setup_rtc_peer_connection_ice_callbacks};
 use sdp::{create_sdp_offer, receive_sdp_answer, receive_sdp_offer_send_answer};
@@ -40,7 +40,7 @@ pub async fn start() {
 
     // Setup chat functionality
     setup_chat_functionality(websocket.clone(), state.clone()).unwrap_throw();
-
+    setup_room_ui(websocket.clone(), state.clone()).unwrap_throw();
     setup_initiator(rtc_connection.clone(), websocket.clone(), state.clone())
         .await
         .unwrap_throw();

@@ -36,23 +36,48 @@ impl UserID {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SignalEnum {
-    // Return called by the server as soon as the user connects
+    // Existing messages (keep for compatibility)
     NewUser(UserID),
     TextMessage(Vec<u8>, SessionID),
-
-    // To manage a live session between two users
     SessionNew,
     SessionReady(SessionID),
     SessionJoin(SessionID),
     SessionJoinSuccess(SessionID),
     SessionJoinError(SessionID),
-
-    // When Connecting to a Session
     VideoOffer(String, SessionID),
     VideoAnswer(String, SessionID),
     IceCandidate(String, SessionID),
     ICEError(String, SessionID),
-
-    //
     Debug,
+
+    // New messages for multi-peer rooms
+    RoomCreate,
+    RoomCreated(SessionID),
+    RoomJoin(SessionID),
+    RoomJoined(SessionID, Vec<UserID>),
+    PeerJoined(SessionID, UserID),
+    PeerLeft(SessionID, UserID),
+
+    // Directed signaling between specific peers in a room
+    PeerOffer {
+        room: SessionID,
+        from: UserID,
+        to: UserID,
+        sdp: String,
+    },
+    PeerAnswer {
+        room: SessionID,
+        from: UserID,
+        to: UserID,
+        sdp: String,
+    },
+    PeerIce {
+        room: SessionID,
+        from: UserID,
+        to: UserID,
+        candidate: String,
+    },
+
+    // Broadcast text to all peers in room
+    RoomText(Vec<u8>, SessionID),
 }

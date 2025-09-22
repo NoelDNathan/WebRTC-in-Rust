@@ -210,6 +210,35 @@ pub async fn handle_message_reply(
                 error!("Received invalid UTF-8 text message");
             }
         }
+        SignalEnum::RoomCreated(room_id) => {
+            let mut state = app_state.borrow_mut();
+            state.set_session_id(room_id.clone());
+            set_html_label("sessionid_lbl", room_id.inner());
+            enable_chat_input();
+            add_message_to_chat("Room created. Share the Room ID with others!");
+        }
+        
+        SignalEnum::RoomJoined(room_id, members) => {
+            let mut state = app_state.borrow_mut();
+            state.set_session_id(room_id.clone());
+            set_html_label("sessionid_lbl", room_id.inner());
+            enable_chat_input();
+            add_message_to_chat(&format!("Joined room with {} existing peers.", members.len()));
+        }
+        
+        SignalEnum::PeerJoined(room_id, user) => {
+            add_message_to_chat(&format!("Peer {} joined", user.clone().inner()));
+        }
+        
+        SignalEnum::PeerLeft(room_id, user) => {
+            add_message_to_chat(&format!("Peer {} left", user.clone().inner()));
+        }
+        
+        SignalEnum::RoomText(data, _room_id) => {
+            if let Ok(text) = String::from_utf8(data) {
+                add_message_to_chat(&format!("Room: {}", text));
+            }
+        }
         remaining => {
             error!("Frontend should not receive {:?}", remaining);
         }
@@ -809,4 +838,49 @@ pub fn disable_chat_input() {
             button_element.set_disabled(true);
         }
     }
+}
+pub fn setup_room_ui(websocket: WebSocket, rc_state: Rc<RefCell<AppState>>) -> Result<(), JsValue> {
+    let window = web_sys::window().expect("No window Found");
+    let document: Document = window.document().expect("Couldn't Get Document");
+
+    // Create Room
+    {
+        let ws = websocket.clone();
+        let btn = document
+            .get_element_by_id("create_room")
+            .and_then(|e| e.dyn_into::<HtmlButtonElement>().ok())
+            .expect("Button create_room not found");
+        let cb = Closure::wrap(Box::new(move || {
+            let msg = SignalEnum::RoomCreate;
+            if let Ok(json) = serde_json_wasm::to_string(&msg) {
+                let _ = ws.send_with_str(&json);
+            }
+        }) as Box<dyn FnMut()>);
+        btn.set_onclick(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // Join Room
+    {
+        let ws = websocket.clone();
+        let doc = document.clone();
+        let btn = document
+            .get_element_by_id("join_room")
+            .and_then(|e| e.dyn_into::<HtmlButtonElement>().ok())
+            .expect("Button join_room not found");
+        let cb = Closure::wrap(Box::new(move || {
+            if let Some(input) = doc.get_element_by_id("room_input").and_then(|e| e.dyn_into::<HtmlInputElement>().ok()) {
+                let room = input.value().trim().to_string();
+                if room.is_empty() { return; }
+                let msg = SignalEnum::RoomJoin(SessionID::new(room));
+                if let Ok(json) = serde_json_wasm::to_string(&msg) {
+                    let _ = ws.send_with_str(&json);
+                }
+            }
+        }) as Box<dyn FnMut()>);
+        btn.set_onclick(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    Ok(())
 }
