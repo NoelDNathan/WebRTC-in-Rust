@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::rc::Rc;
 
@@ -27,6 +28,7 @@ const TURN: &str = "turn:192.168.178.60:3478";
 pub struct AppState {
     session_id: Option<SessionID>,
     user_id: Option<UserID>,
+    peers: HashMap<UserID, RtcPeerConnection>,
 }
 
 impl AppState {
@@ -34,7 +36,20 @@ impl AppState {
         AppState {
             session_id: None,
             user_id: None,
+            peers: HashMap::new(),
         }
+    }
+
+    pub(crate) fn add_peer(&mut self, user_id: UserID, peer_connection: RtcPeerConnection) {
+        self.peers.insert(user_id, peer_connection);
+    }
+
+    pub(crate) fn remove_peer(&mut self, user_id: &UserID) {
+        self.peers.remove(user_id);
+    }
+
+    pub(crate) fn get_peer(&self, user_id: &UserID) -> Option<&RtcPeerConnection> {
+        self.peers.get(user_id)
     }
 
     pub(crate) fn set_session_id(&mut self, s_id: SessionID) {
@@ -135,6 +150,205 @@ pub async fn handle_message_reply(
     };
 
     match result {
+        // Rooms (mesh) signalling and events
+        SignalEnum::RoomCreated(room_id) => {
+            info!("RoomCreated Received ! {:?}", room_id);
+            let mut state = app_state.borrow_mut();
+            state.set_session_id(room_id.clone());
+            drop(state);
+            set_html_label("sessionid_lbl", room_id.inner());
+            enable_chat_input();
+            add_message_to_chat("Room created. Share the Room ID with others!");
+        }
+        SignalEnum::RoomJoined(room_id, members) => {
+            info!("RoomJoined {:?}, members: {}", room_id, members.len());
+            let mut state = app_state.borrow_mut();
+            let my_id = state.get_user_id();
+            state.set_session_id(room_id.clone());
+            let my_id = my_id.unwrap_or_else(|| UserID::new("".into()));
+            // Initiate offers to existing members
+            for member in members.into_iter() {
+                if member != my_id {
+                    let pc = create_stun_peer_connection()?;
+                    // Ensure local media
+                    let media_stream = get_video(String::from("peer_a_video")).await?;
+                    pc.add_stream(&media_stream);
+                    // Track in state
+                    state.add_peer(member.clone(), pc.clone());
+                    // ICE outbound for this pair
+                    setup_mesh_ice_outbound(
+                        pc.clone(),
+                        websocket.clone(),
+                        room_id.clone(),
+                        my_id.clone(),
+                        member.clone(),
+                    );
+                    // Create and send offer
+                    let sdp_offer = create_sdp_offer(pc.clone()).await?;
+                    let msg = SignalEnum::PeerOffer {
+                        room: room_id.clone(),
+                        from: my_id.clone(),
+                        to: member.clone(),
+                        sdp: sdp_offer,
+                    };
+
+                    let response: String = match serde_json_wasm::to_string(&msg) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            error!("Could not Serialize PeerOffer {}", e);
+                            return Err(JsValue::from_str("Could not Serialize PeerOffer"));
+                        }
+                    };
+        
+                    match websocket.send_with_str(&response) {
+                        Ok(_) => info!("PeerOffer SignalEnum sent"),
+                        Err(err) => error!("Error sending PeerOffer SignalEnum: {:?}", err),
+                    }       
+                }
+            }
+            drop(state);
+            set_html_label("sessionid_lbl", room_id.inner());
+            enable_chat_input();
+            add_message_to_chat("Joined room. Connecting to peers...");
+        }
+        SignalEnum::PeerJoined(room_id, new_peer_id) => {
+            info!("PeerJoined {:?}", new_peer_id);
+            let mut state = app_state.borrow_mut();
+            let my_id = match state.get_user_id() {
+                Some(id) => id,
+                None => return Ok(()),
+            };
+            // Create connection and send offer to the new peer
+            let pc = create_stun_peer_connection()?;
+            let media_stream = get_video(String::from("peer_a_video")).await?;
+            pc.add_stream(&media_stream);
+            state.add_peer(new_peer_id.clone(), pc.clone());
+            setup_mesh_ice_outbound(
+                pc.clone(),
+                websocket.clone(),
+                room_id.clone(),
+                my_id.clone(),
+                new_peer_id.clone(),
+            );
+            let sdp_offer = create_sdp_offer(pc.clone()).await?;
+            let msg = SignalEnum::PeerOffer {
+                room: room_id.clone(),
+                from: my_id.clone(),
+                to: new_peer_id.clone(),
+                sdp: sdp_offer,
+            };
+            let response: String = match serde_json_wasm::to_string(&msg) {
+                Ok(x) => x,
+                Err(e) => {
+                    error!("Could not Serialize PeerOffer {}", e);
+                    return Err(JsValue::from_str("Could not Serialize PeerOffer"));
+                }
+            };
+
+            match websocket.send_with_str(&response) {
+                Ok(_) => info!("PeerOffer SignalEnum sent"),
+                Err(err) => error!("Error sending PeerOffer SignalEnum: {:?}", err),
+            }
+            add_message_to_chat(&format!("Peer {} joined", new_peer_id.clone().inner()));
+        }
+        SignalEnum::PeerLeft(_room_id, user) => {
+            info!("PeerLeft {:?}", user);
+            let mut state = app_state.borrow_mut();
+            if let Some(pc) = state.get_peer(&user).cloned() {
+                pc.close();
+            }
+            state.remove_peer(&user);
+            add_message_to_chat(&format!("Peer {} left", user.inner()));
+        }
+        SignalEnum::PeerOffer {
+            room,
+            from,
+            to,
+            sdp,
+        } => {
+            let mut state = app_state.borrow_mut();
+            let my_id = match state.get_user_id() {
+                Some(id) => id,
+                None => return Ok(()),
+            };
+            if to != my_id {
+                return Ok(());
+            }
+            let pc = match state.get_peer(&from).cloned() {
+                Some(pc) => pc,
+                None => {
+                    let pc = create_stun_peer_connection()?;
+                    // Ensure local media
+                    let media_stream = get_video(String::from("peer_a_video")).await?;
+                    pc.add_stream(&media_stream);
+                    setup_mesh_ice_outbound(
+                        pc.clone(),
+                        websocket.clone(),
+                        room.clone(),
+                        my_id.clone(),
+                        from.clone(),
+                    );
+                    state.add_peer(from.clone(), pc.clone());
+                    pc
+                }
+            };
+            let sdp_answer = receive_sdp_offer_send_answer(pc.clone(), sdp).await?;
+            let resp = SignalEnum::PeerAnswer {
+                room,
+                from: my_id.clone(),
+                to: from.clone(),
+                sdp: sdp_answer,
+            };
+            
+            let response: String = match serde_json_wasm::to_string(&resp) {
+                Ok(x) => x,
+                Err(e) => {
+                    error!("Could not Serialize PeerAnswer {}", e);
+                    return Err(JsValue::from_str("Could not Serialize PeerAnswer"));
+                }
+            };
+
+            match websocket.send_with_str(&response) {
+                Ok(_) => info!("PeerAnswer SignalEnum sent"),
+                Err(err) => error!("Error sending PeerAnswer SignalEnum: {:?}", err),
+            }
+        }
+        SignalEnum::PeerAnswer {
+            room: _room,
+            from,
+            to,
+            sdp,
+        } => {
+            let mut state = app_state.borrow_mut();
+            let my_id = match state.get_user_id() {
+                Some(id) => id,
+                None => return Ok(()),
+            };
+            if to != my_id {
+                return Ok(());
+            }
+            if let Some(pc) = state.get_peer(&from) {
+                receive_sdp_answer(pc.clone(), sdp).await?;
+            }
+        }
+        SignalEnum::PeerIce {
+            room: _room,
+            from,
+            to,
+            candidate,
+        } => {
+            let mut state = app_state.borrow_mut();
+            let my_id = match state.get_user_id() {
+                Some(id) => id,
+                None => return Ok(()),
+            };
+            if to != my_id {
+                return Ok(());
+            }
+            if let Some(pc) = state.get_peer(&from) {
+                received_new_ice_candidate(candidate, pc.clone()).await?;
+            }
+        }
         SignalEnum::VideoOffer(offer, session_id) => {
             warn!("VideoOffer Received ");
             let sdp_answer = receive_sdp_offer_send_answer(peer_connection.clone(), offer).await?;
@@ -217,7 +431,7 @@ pub async fn handle_message_reply(
             enable_chat_input();
             add_message_to_chat("Room created. Share the Room ID with others!");
         }
-        
+
         SignalEnum::RoomJoined(room_id, members) => {
             let mut state = app_state.borrow_mut();
             state.set_session_id(room_id.clone());
@@ -225,15 +439,15 @@ pub async fn handle_message_reply(
             enable_chat_input();
             add_message_to_chat(&format!("Joined room with {} existing peers.", members.len()));
         }
-        
+
         SignalEnum::PeerJoined(room_id, user) => {
             add_message_to_chat(&format!("Peer {} joined", user.clone().inner()));
         }
-        
+
         SignalEnum::PeerLeft(room_id, user) => {
             add_message_to_chat(&format!("Peer {} left", user.clone().inner()));
         }
-        
+
         SignalEnum::RoomText(data, _room_id) => {
             if let Ok(text) = String::from_utf8(data) {
                 add_message_to_chat(&format!("Room: {}", text));
@@ -364,6 +578,31 @@ pub fn setup_show_signalling_server_state(ws: WebSocket) {
         .expect("#Button should be a be an `HtmlButtonElement`")
         .set_onclick(Some(btn_cb.as_ref().unchecked_ref()));
     btn_cb.forget();
+}
+
+
+fn setup_mesh_ice_outbound(
+    pc: RtcPeerConnection,
+    ws: WebSocket,
+    room: SessionID,
+    from: UserID,
+    to: UserID,
+) {
+    let cb = Closure::wrap(Box::new(move |ev: web_sys::RtcPeerConnectionIceEvent| {
+        if let Some(cand) = ev.candidate() {
+            let msg = SignalEnum::PeerIce {
+                room: room.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                candidate: cand.candidate(),
+            };
+            if let Ok(json) = serde_json_wasm::to_string(&msg) {
+                let _ = ws.send_with_str(&json);
+            }
+        }
+    }) as Box<dyn FnMut(_)>);
+    pc.set_onicecandidate(Some(cb.as_ref().unchecked_ref()));
+    cb.forget();
 }
 
 /// RTC Listener
@@ -745,7 +984,8 @@ fn send_text_message(ws: WebSocket, rc_state: Rc<RefCell<AppState>>) {
 
     // Create and send the text message
     let message_bytes = message_text.as_bytes().to_vec();
-    let signal = SignalEnum::TextMessage(message_bytes, session_id);
+    // Send to entire room via signalling server
+    let signal = SignalEnum::RoomText(message_bytes, session_id);
 
     let serialized_msg = match serde_json_wasm::to_string(&signal) {
         Ok(msg) => msg,
@@ -869,9 +1109,14 @@ pub fn setup_room_ui(websocket: WebSocket, rc_state: Rc<RefCell<AppState>>) -> R
             .and_then(|e| e.dyn_into::<HtmlButtonElement>().ok())
             .expect("Button join_room not found");
         let cb = Closure::wrap(Box::new(move || {
-            if let Some(input) = doc.get_element_by_id("room_input").and_then(|e| e.dyn_into::<HtmlInputElement>().ok()) {
+            if let Some(input) = doc
+                .get_element_by_id("room_input")
+                .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+            {
                 let room = input.value().trim().to_string();
-                if room.is_empty() { return; }
+                if room.is_empty() {
+                    return;
+                }
                 let msg = SignalEnum::RoomJoin(SessionID::new(room));
                 if let Ok(json) = serde_json_wasm::to_string(&msg) {
                     let _ = ws.send_with_str(&json);
