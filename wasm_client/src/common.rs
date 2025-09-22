@@ -687,13 +687,16 @@ pub async fn setup_listener(
         host_session(ws_clone);
     }) as Box<dyn FnMut()>);
 
-    document
-        .get_element_by_id("start_session")
-        .expect("should have start_session on the page")
-        .dyn_ref::<HtmlButtonElement>()
-        .expect("#Button should be a be an `HtmlButtonElement`")
-        .set_onclick(Some(btn_cb.as_ref().unchecked_ref()));
-    btn_cb.forget();
+    if let Some(elem) = document.get_element_by_id("start_session") {
+        if let Some(button) = elem.dyn_ref::<HtmlButtonElement>() {
+            button.set_onclick(Some(btn_cb.as_ref().unchecked_ref()));
+            btn_cb.forget();
+        } else {
+            warn!("Element start_session is not an HtmlButtonElement");
+        }
+    } else {
+        warn!("Button start_session not found; skipping listener setup for it");
+    }
 
     Ok(())
 }
@@ -783,12 +786,22 @@ fn rtc_ice_state_change(
                     let res_media_stream: Result<MediaStream, _> = first_stream.try_into();
                     let media_stream = res_media_stream.unwrap();
                     debug!("Media Stream {:?}", media_stream);
-                    let video_element: Element =
-                        document.get_element_by_id(&video_element).unwrap_throw();
-                    let vid_elem: HtmlVideoElement =
-                        video_element.dyn_into::<HtmlVideoElement>().unwrap_throw();
-                    let res = vid_elem.set_src_object(Some(&media_stream));
-                    debug!("Result Video Set src Object {:?} ", res);
+                    if let Some(el) = document.get_element_by_id(&video_element) {
+                        match el.dyn_into::<HtmlVideoElement>() {
+                            Ok(vid_elem) => {
+                                let res = vid_elem.set_src_object(Some(&media_stream));
+                                debug!("Result Video Set src Object {:?} ", res);
+                            }
+                            Err(_) => {
+                                warn!("Element '{}' is not an HtmlVideoElement", video_element);
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "Video element '{}' not found; skipping remote stream attach",
+                            video_element
+                        );
+                    }
                 }
             }
             _ => {
