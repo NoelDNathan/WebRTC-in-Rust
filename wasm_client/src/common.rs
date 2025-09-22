@@ -199,11 +199,11 @@ pub async fn handle_message_reply(
                             return Err(JsValue::from_str("Could not Serialize PeerOffer"));
                         }
                     };
-        
+
                     match websocket.send_with_str(&response) {
                         Ok(_) => info!("PeerOffer SignalEnum sent"),
                         Err(err) => error!("Error sending PeerOffer SignalEnum: {:?}", err),
-                    }       
+                    }
                 }
             }
             drop(state);
@@ -299,7 +299,7 @@ pub async fn handle_message_reply(
                 to: from.clone(),
                 sdp: sdp_answer,
             };
-            
+
             let response: String = match serde_json_wasm::to_string(&resp) {
                 Ok(x) => x,
                 Err(e) => {
@@ -437,7 +437,10 @@ pub async fn handle_message_reply(
             state.set_session_id(room_id.clone());
             set_html_label("sessionid_lbl", room_id.inner());
             enable_chat_input();
-            add_message_to_chat(&format!("Joined room with {} existing peers.", members.len()));
+            add_message_to_chat(&format!(
+                "Joined room with {} existing peers.",
+                members.len()
+            ));
         }
 
         SignalEnum::PeerJoined(room_id, user) => {
@@ -579,7 +582,6 @@ pub fn setup_show_signalling_server_state(ws: WebSocket) {
         .set_onclick(Some(btn_cb.as_ref().unchecked_ref()));
     btn_cb.forget();
 }
-
 
 fn setup_mesh_ice_outbound(
     pc: RtcPeerConnection,
@@ -750,40 +752,6 @@ pub async fn setup_initiator(
     dc1.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
     onmessage_callback.forget();
 
-    let btn_cb = Closure::wrap(Box::new(move || {
-        let ws_clone = ws_clone_external.clone();
-        let peer_a_clone = peer_a_clone_external.clone();
-        let rc_state_clone = rc_state_clone_ext.clone();
-
-        // let res =
-        //     setup_rtc_peer_connection_ice_callbacks(peer_a_clone, ws_clone.clone(), rc_state_clone);
-        // if res.is_err() {
-        //     error!(
-        //         "Error Setting up RTCPeerConnection ICE Callbacks {:?}",
-        //         res.unwrap_err()
-        //     )
-        // }
-
-        let ws_clone1 = ws_clone.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let res =
-                setup_rtc_peer_connection_ice_callbacks(peer_a_clone, ws_clone1, rc_state_clone)
-                    .await;
-            if res.is_err() {
-                log::error!("Error Setting up ice callbacks {:?}", res.unwrap_err())
-            }
-        });
-
-        try_connect_to_session(ws_clone);
-    }) as Box<dyn FnMut()>);
-    document
-        .get_element_by_id("connect_to_session")
-        .expect("should have connect_to_session on the page")
-        .dyn_ref::<HtmlButtonElement>()
-        .expect("#Button should be a be an `HtmlButtonElement`")
-        .set_onclick(Some(btn_cb.as_ref().unchecked_ref()));
-    btn_cb.forget();
-
     // Start Remote Video Callback
     let video_element = "peer_b_video".into();
     // let state_lbl = "InitiatorState".into();
@@ -841,23 +809,6 @@ fn set_html_label(html_label: &str, session_id: String) {
         .set_text_content(Some(&session_id));
 }
 
-fn get_session_id_from_input() -> String {
-    let window = web_sys::window().expect("No window Found, We've got bigger problems here");
-    let document: Document = window.document().expect("Couldn't Get Document");
-    let sid_input = "sid_input";
-
-    let sid_input = document
-        .get_element_by_id(sid_input)
-        .unwrap_or_else(|| panic!("Should have {} on the page", sid_input))
-        .dyn_ref::<HtmlInputElement>()
-        .expect("#HtmlInputElement should be a be an `HtmlInputElement`")
-        .value()
-        .trim()
-        .to_string();
-    info!("sid_inputs {}", sid_input);
-    sid_input
-}
-
 fn set_session_connection_status_error(error: String) {
     let window = web_sys::window().expect("No window Found, We've got bigger problems here");
     let document: Document = window.document().expect("Couldn't Get Document");
@@ -876,25 +827,6 @@ fn set_session_connection_status_error(error: String) {
         .dyn_ref::<HtmlLabelElement>()
         .expect("#Button should be a be an `HtmlLabelElement`")
         .set_text_content(Some(&e_string));
-}
-
-fn try_connect_to_session(ws: WebSocket) {
-    let session_id_string = get_session_id_from_input();
-    let session_id = SessionID::new(session_id_string);
-    let msg = SignalEnum::SessionJoin(session_id);
-    let ser_msg: String = match serde_json_wasm::to_string(&msg) {
-        Ok(x) => x,
-        Err(e) => {
-            error!("Could not serialize SessionJoin {}", e);
-            return;
-        }
-    };
-    match ws.send_with_str(&ser_msg) {
-        Ok(_) => {}
-        Err(e) => {
-            error!("Error Sending SessionJoin {:?}", e);
-        }
-    }
 }
 
 async fn send_video_offer(rtc_conn: RtcPeerConnection, ws: WebSocket, session_id: SessionID) {

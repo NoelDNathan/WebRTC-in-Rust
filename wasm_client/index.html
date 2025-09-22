@@ -153,18 +153,15 @@
         // Detectar si estamos en GitHub Pages o desarrollo local
         const isGitHubPages = window.location.hostname.includes('github.io');
         
+        const load = async (base) => {
+            const module = await import(base + 'wasm_client.js');
+            const init = module.default;
+            await init({ module_or_path: base + 'wasm_client_bg.wasm' });
+        };
         if (isGitHubPages) {
-            // GitHub Pages
-            import('/WebRTC-in-Rust/pkg/wasm_client.js').then(module => {
-                const init = module.default;
-                return init('/WebRTC-in-Rust/pkg/wasm_client_bg.wasm');
-            });
+            load('/WebRTC-in-Rust/pkg/');
         } else {
-            // Desarrollo local
-            import('./pkg/wasm_client.js').then(module => {
-                const init = module.default;
-                return init('./pkg/wasm_client_bg.wasm');
-            });
+            load('./pkg/');
         }
     </script>
 </body>
