@@ -1,9 +1,4 @@
-# Potential Workspace IDEAs
-[workspace]
-resolver = "2"
-members = [
-    "wasm_client",
-    "signalling-server",
-    "shared-protocol",
-    "turn-server"
-]
+[package]
+name = "webrtc-in-rust"
+version = "0.1.0"
+edition = "2021"

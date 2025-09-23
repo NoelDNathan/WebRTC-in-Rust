@@ -15,6 +15,9 @@ use web_sys::{
 
 use shared_protocol::{SessionID, SignalEnum, UserID};
 
+use crate::handle_poker_messages::handle_poker_message;
+use crate::poker_state::PokerState;
+
 use crate::{
     create_sdp_offer, receive_sdp_answer, receive_sdp_offer_send_answer,
     received_new_ice_candidate, setup_rtc_peer_connection_ice_callbacks, wasm_bindgen,
@@ -22,6 +25,7 @@ use crate::{
 
 const STUN_SERVER: &str = "stun:stun.l.google.com:19302";
 const TURN: &str = "turn:192.168.178.60:3478";
+
 
 #[derive(Debug)]
 pub struct AppState {
@@ -378,19 +382,33 @@ pub async fn setup_listener(
         // Need to setup Media Stream BEFORE sending SDP offer!!!
         // SDP offer Contains information about the Video Streaming technologies available to this and the other browser
         // If negotiation has completed, this closure will be called
+        // let ondatachannel_callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
+        //     let dc2 = ev.channel();
+        //     info!("peer_b.ondatachannel! : {}", dc2.label());
+        //     let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
+        //         if let Some(message) = ev.data().as_string() {
+        //             warn!("{:?}", message)
+        //         }
+        //     }) as Box<dyn FnMut(MessageEvent)>);
+        //     dc2.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
+        //     onmessage_callback.forget();
+        //     dc2.send_with_str("Ping from peer_b.dc!").unwrap();
+        // }) as Box<dyn FnMut(RtcDataChannelEvent)>);
+
+        let poker_state = PokerState::default();
+
         let ondatachannel_callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
             let dc2 = ev.channel();
             info!("peer_b.ondatachannel! : {}", dc2.label());
             let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
                 if let Some(message) = ev.data().as_string() {
-                    warn!("{:?}", message)
+                    handle_poker_message(message, poker_state.clone(), dc2.clone(), peer_b_clone.clone());
                 }
             }) as Box<dyn FnMut(MessageEvent)>);
             dc2.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
             onmessage_callback.forget();
-            dc2.send_with_str("Ping from peer_b.dc!").unwrap();
-        })
-            as Box<dyn FnMut(RtcDataChannelEvent)>);
+        }) as Box<dyn FnMut(RtcDataChannelEvent)>);
+        
 
         peer_b_clone.set_ondatachannel(Some(ondatachannel_callback.as_ref().unchecked_ref()));
         ondatachannel_callback.forget();
@@ -447,11 +465,28 @@ fn host_session(ws: WebSocket) {
     }
 }
 
+
 fn peer_a_dc_on_message(dc: RtcDataChannel) -> Closure<dyn FnMut(MessageEvent)> {
     Closure::wrap(Box::new(move |ev: MessageEvent| {
         if let Some(message) = ev.data().as_string() {
-            warn!("{:?}", message);
-            dc.send_with_str("Pong from peer_a data channel!").unwrap();
+            // Deserializar el mensaje del protocolo
+            if let Ok(protocol_msg) = serde_json_wasm::from_str::<ProtocolMessage>(&message) {
+                match protocol_msg {
+                    ProtocolMessage::Text(data) => {
+                        if let Ok(text) = String::from_utf8(data) {
+                            info!("Received text message: {}", text);
+                            add_message_to_chat(&format!("Peer: {}", text));
+                        }
+                    }
+                    ProtocolMessage::Proof(data) => {
+                        info!("Received proof message: {:?}", data);
+                        // Procesar la prueba aquí
+                    }
+                   
+                }
+            } else {
+                warn!("Failed to deserialize protocol message: {}", message);
+            }
         }
     }) as Box<dyn FnMut(MessageEvent)>)
 }
