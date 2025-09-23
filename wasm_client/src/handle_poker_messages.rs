@@ -614,33 +614,15 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
         if s.proof_reshuffle_bytes.len() > 0 {
             info!("There are more than one proof reshuffle");
         }
-        else if proof_reshuffle_bytes.len() == 1 {
+        else if s.proof_reshuffle_bytes.len() == 1 {
 
             match process_reshuffle_verification(
-                &mut connected_peers,
-                current_reshuffler,
-                &mut swarm,
-                &topic,
-                &mut prover_shuffle,
-                &mut prover_reshuffle,
-                &pp,
-                &mut card_mapping,
-                &public_reshuffle_bytes,
-                &proof_reshuffle_bytes,
-                joint_pk.as_ref().unwrap(),
-                deck.as_ref().unwrap(),
-                &player.as_ref().expect(ERROR_PLAYER_NOT_SET),
-                &player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET),
-                current_dealer,
-                m,
-                n,
-                rng,
-                Some(&channel),
-                Some(&verifyShuffling),
+                state,
+                data_channel
             ){
                 Ok((reshuffled_deck, new_reshuffler)) => {
-                    deck = Some(reshuffled_deck);
-                    current_reshuffler = new_reshuffler;
+                    s.deck = Some(reshuffled_deck);
+                    s.current_reshuffler = new_reshuffler;
                 }
                 Err(e) => {
                     error!("Error en proceso de verificación de reshuffle: {:?}", e);
@@ -648,11 +630,41 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
             }
         }
         else{
-            info!("There are no proof reshuffle bytes");
+            error!("There are no proof reshuffle bytes");
         }
     }
 }
 
+
+fn handle_zk_proof_remove_and_remask_proof_received(
+    state: Rc<RefCell<PokerState>>,
+    data_channel: RtcDataChannel,
+    proof_bytes: Vec<u8>,
+) {
+    let s = state.borrow_mut();
+
+    s.proof_reshuffle_bytes = proof_bytes;
+
+    if is_all_public_reshuffle_bytes_received {
+        match process_reshuffle_verification(
+            state,
+            data_channel
+        ) {
+            Ok((reshuffled_deck, new_reshuffler)) => {
+                s.deck = Some(reshuffled_deck);
+                s.current_reshuffler = new_reshuffler;
+            }
+            Err(e) => {
+                error!("Error en proceso de verificación de reshuffle: {:?}", e);
+            }
+        }
+    } else {
+        error!("No all public reshuffle bytes");
+    }
+
+
+
+}
 // -----------------------------HELPER FUNCTIONS-----------------------------
 
 pub fn send_protocol_message(
@@ -951,13 +963,9 @@ fn shuffle_remask_and_send(
     }
 }
 
-
-
 fn process_reshuffle_verification(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
-    public_reshuffle_bytes: Vec<(u8, Vec<u8>)>,
-    proof_reshuffle_bytes: Vec<u8>,
+    data_channel: RtcDataChannel
 ) -> Result<(Vec<MaskedCard>, u8), Box<dyn Error>> {
 
     let s = state.borrow_mut();
@@ -965,7 +973,7 @@ fn process_reshuffle_verification(
 
     match find_player_by_id(s.players_connected, current_reshuffler) {
         Some((_, player_info)) => {
-            let cards_vec: Vec<MaskedCard> = player_info
+            let player_cards: Vec<MaskedCard> = player_info
                 .cards_public
                 .iter()
                 .filter_map(|card| card.clone())
@@ -975,11 +983,8 @@ fn process_reshuffle_verification(
             match verify_remask_for_reshuffle(
                 state,
                 data_channel,
-                public_reshuffle_bytes,
-                proof_reshuffle_bytes,
-                proof_bytes,
                 player_cards,
-                player_pk
+                &player_info.pk
             ) {
                 Ok(reshuffled_deck) => {
                     let new_reshuffler = s.current_reshuffler + 1;
@@ -1050,19 +1055,15 @@ fn process_reshuffle_verification(
     }
 }
 
-
 pub fn verify_remask_for_reshuffle(
     state: Rc<RefCell<PokerState>>,
     data_channel: RtcDataChannel,
-    public_reshuffle_bytes: Vec<(u8, Vec<u8>)>,
-    proof_reshuffle_bytes: Vec<u8>,
-    proof_bytes: Vec<u8>,
     player_cards: Vec<MaskedCard>,
-    player_pk: PublicKey,
+    player_pk: &PublicKey,
 
 ) -> Result<Vec<MaskedCard>, Box<dyn Error>> {
 
-    let public_strings = deserialize_chunks(public_bytes)?;
+    let public_strings = deserialize_chunks(s.public_reshuffle_bytes)?;
     info!("verify_remask_for_reshuffle");
 
     let public_cards_1 = player_cards[0].clone();
@@ -1072,7 +1073,7 @@ pub fn verify_remask_for_reshuffle(
     let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
     let m_list = card_mapping.keys().cloned().collect::<Vec<Card>>();
-    let proof = deserialize_proof(&proof_bytes).expect(ERROR_DESERIALIZE_PROOF_FAILED);
+    let proof = deserialize_proof(&s.proof_reshuffle_bytes).expect(ERROR_DESERIALIZE_PROOF_FAILED);
 
     let public_fr: Vec<Bn254Fr> = public_strings
         .iter()
