@@ -49,6 +49,8 @@ const ERROR_RECEIVED_REVEAL_TOKENS1_NOT_SET: &str = "Received reveal tokens 1 sh
 const ERROR_RECEIVED_REVEAL_TOKENS2_NOT_SET: &str = "Received reveal tokens 2 should be set";
 const ERROR_SHUFFLE_REMASK_FAILDED: &str = "Shuffle and remask failed";
 const ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED: &str = "Deserialize reveal token failed";
+
+
 const m: usize = 2;
 const n: usize = 26;
 const NUM_OF_CARDS: usize = m * n;
@@ -662,9 +664,62 @@ fn handle_zk_proof_remove_and_remask_proof_received(
         error!("No all public reshuffle bytes");
     }
 
+}
+
+
+fn handle_zk_proof_shuffle_chunk_received(
+    state: Rc<RefCell<PokerState>>,
+    data_channel: RtcDataChannel,
+    i: u8,
+    length: u8,
+    chunk: Vec<u8>,
+) {
+    let s = state.borrow_mut();
+    s.public_shuffle_bytes.push((i, chunk.clone()));
+
+    if s.public_shuffle_bytes.len() - 1 == length {
+        s.is_all_public_shuffle_bytes_received = true;
+        if s.proof_shuffle_bytes.is_empty() {
+            error!("No shuffle proof bytes yet");
+        } else {
+            if validate_chunks(&s.public_shuffle_bytes, length) {
+                // Call process_shuffle_verification here
+                match process_shuffle_verification(
+                    &mut prover_shuffle,
+                    &pp,
+                    joint_pk.as_ref().unwrap(),
+                    &mut deck,
+                    &public_shuffle_bytes,
+                    &proof_shuffle_bytes,
+                    &mut current_shuffler,
+                    &player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET),
+                    num_players_expected,
+                    &mut player.as_mut().expect(ERROR_PLAYER_NOT_SET),
+                    &mut connected_peers,
+                    &mut swarm,
+                    &topic,
+                    rng,
+                    m,
+                    n,
+                    Some(&channel),
+                    Some(&verifyShuffling),
+                    Some(&verifyRevealToken),
+                ) {
+                    Ok(_) => {
+                        info!("Shuffle verification completed");
+                    }
+                    Err(e) => {
+                        error!("Error in shuffle verification: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
 
 
 }
+
+
 // -----------------------------HELPER FUNCTIONS-----------------------------
 
 pub fn send_protocol_message(
@@ -698,6 +753,55 @@ fn find_player_by_id(
         .find(|(_, player_info)| player_info.id == id)
         .map(|(peer_id, player_info)| (peer_id, player_info))
 }
+
+fn validate_chunks(chunks: &[(u8, Vec<u8>)], expected_length: u8) -> bool {
+    if chunks.len() != expected_length as usize {
+        return false;
+    }
+
+    let mut indices: Vec<u8> = chunks.iter().map(|(i, _)| *i).collect();
+    indices.sort();
+
+    for (i, &index) in indices.iter().enumerate() {
+        if index != i as u8 {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_dealer(current_dealer: u8, player_id: &String) -> bool {
+    current_dealer == player_id.parse::<u8>().unwrap()
+}
+
+
+pub fn deserialize_canonical<T: CanonicalDeserialize>(bytes: &[u8]) -> Result<T, Box<dyn Error>> {
+    let mut reader = &bytes[..];
+    let value = T::deserialize(&mut reader)?;
+    Ok(value)
+}
+
+pub fn serialize_canonical<T: CanonicalSerialize>(data: &T) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut buffer = Vec::new();
+    data.serialize(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn deserialize_chunks(chunks: &[(u8, Vec<u8>)]) -> Result<Vec<String>, Box<dyn Error>> {
+    // Crear una copia mutable del vector para ordenarlo
+    let mut sorted_chunks = chunks.to_vec();
+    sorted_chunks.sort_by_key(|(i, _)| *i);
+
+    let result = deserializar_chunks_a_strings(
+        sorted_chunks
+            .iter()
+            .map(|(_, chunk)| chunk.clone())
+            .collect(),
+    );
+
+    result
+}
+
 
 fn dealt_cards(
     state: Rc<RefCell<PokerState>>,
@@ -1055,6 +1159,198 @@ fn process_reshuffle_verification(
     }
 }
 
+
+#[allow(non_snake_case)]
+fn process_shuffle_verification(
+    state: Rc<RefCell<PokerState>>,
+    data_channel: RtcDataChannel,
+) -> Result<(), Box<dyn Error>> {
+    let s = state.borrow_mut();
+    let public_strings = deserialize_chunks(s.public_shuffle_bytes)?;
+    let public_fr: Vec<Bn254Fr> = public_strings
+        .iter()
+        .map(|s_i| {
+            let cleaned_str = s_i.trim();
+            match Bn254Fr::from_str(cleaned_str) {
+                Ok(fr) => fr,
+                Err(e) => {
+                    error!("Error parsing string '{}': {:?}", cleaned_str, e);
+                    Bn254Fr::from(0u64)
+                }
+            }
+        })
+        .collect();
+
+    let proof = deserialize_proof(s.proof_shuffle_bytes)?;
+    let pp = s.poker_params.pp;
+    let joint_pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
+    let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
+    let id = s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<u8>().unwrap();
+    let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
+    let rng = s.rng.as_mut();
+
+    match CardProtocol::verify_shuffle_remask2(
+        s.provers.prover_shuffle,
+        pp,
+        joint_pk,
+        deck,
+        public_fr,
+        proof,
+    ) {
+        Ok(shuffled_deck) => {
+            s.deck = Some(shuffled_deck.clone());
+            s.current_shuffler += 1;
+
+            if s.current_shuffler == s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<usize>().unwrap() {
+                // Call shuffle_remask_and_send as before
+                match shuffle_remask_and_send(
+                    state,
+                    data_channel,
+                    &shuffled_deck,
+                ) {
+                    Ok(new_deck) => {
+                        s.deck = Some(new_deck);
+                    }
+                    Err(e) => {
+                        error!("Error in shuffle verification: {:?}", e);
+                    }
+                }
+            }
+
+            if s.current_shuffler == s.num_players_connected - 1 {
+                s.current_shuffler = 0;
+                info!("All players shuffled, revealing cards");
+                let id = s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<u8>().unwrap();
+                
+                let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
+                
+        
+                player.receive_card(deck[id as usize * 2 + 5]);
+                player.receive_card(deck[id as usize * 2 + 1 + 5]);
+
+                for i in 0..s.num_players_connected {
+                    if i == id as usize {
+                        continue;
+                    }
+                    let card1 = deck[i * 2 + 5];
+                    let card2 = deck[i * 2 + 5 + 1];
+
+                    let reveal_token1: (RevealToken, RevealProof, PublicKey) =
+                        player.compute_reveal_token(rng, pp, &card1)?;
+                    let reveal_token2: (RevealToken, RevealProof, PublicKey) =
+                        player.compute_reveal_token(rng, pp, &card2)?;
+                    let reveal_token1_bytes = serialize_canonical(&reveal_token1)?;
+                    let reveal_token2_bytes = serialize_canonical(&reveal_token2)?;
+
+                    let verify_reveal_token_clone = s.verify_reveal_token.clone();
+
+                    let card1_string = card1.0.to_string();
+                    let card2_string = card2.0.to_string();
+                    let generator_string = pp.enc_parameters.generator.to_string();
+
+                    let player_pk_string = player.pk.to_string();
+                    let verify_reveal_token_clone = verifyRevealToken.clone();
+
+                    let token1 = reveal_token1.0;
+                    let token2 = reveal_token2.0;
+
+                    let proof1 = reveal_token1.1;
+                    let proof2 = reveal_token2.1;
+
+                    let G_card1 = JsValue::from_str(format!("{:?}", card1_string));
+                    let G_card2 = JsValue::from_str(format!("{:?}", card2_string));
+
+                    let H = JsValue::from_str(format!("{:?}", generator_string));
+
+                    let statement1_card1 =
+                        JsValue::from_str(format!("{:?}", token1.0.to_string()));
+                    let statement1_card2 =
+                        JsValue::from_str(format!("{:?}", token2.0.to_string()));
+
+                    let statement2 = JsValue::from_str(format!("{:?}", player_pk_string));
+
+                    let A_card1 = JsValue::from_str(format!("{:?}", proof1.a.to_string()));
+                    let B_card1 = JsValue::from_str(format!("{:?}", proof1.b.to_string()));
+                    let r_card1 = JsValue::from_str(format!("{:?}", proof1.r.to_string()));
+
+                    let A_card2 = JsValue::from_str(format!("{:?}", proof2.a.to_string()));
+                    let B_card2 = JsValue::from_str(format!("{:?}", proof2.b.to_string()));
+                    let r_card2 = JsValue::from_str(format!("{:?}", proof2.r.to_string()));
+                    let receiver_chair = JsValue::from_str(format!("{:?}", i));
+                    
+                    verify_shuffling_clone.call2(&JsValue::NULL,
+                        G_card1,
+                        G_card2,
+                        H,
+                        statement1_card1,
+                        statement1_card2,
+                        statement2,
+                        A_card1,
+                        B_card1,
+                        A_card2,
+                        B_card2,
+                        r_card1,
+                        r_card2,
+                    );
+                
+                    let new_token1 =
+                        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                            &reveal_token1_bytes,
+                        )?;
+                    let new_token2 =
+                        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                            &reveal_token2_bytes,
+                        )?;
+
+                    info!("Pushing reveal tokens to player {}", i);
+
+                    match find_player_by_id(s.players_connected, i as u8) {
+                        Some((peer_id, player_info)) => {
+                            player_info.cards = [Some(card1), Some(card2)];
+                            player_info.reveal_tokens[0].push(new_token1);
+                            player_info.reveal_tokens[1].push(new_token2);
+                        }
+                        None => {
+                            error!("Player with id {} not found", i);
+                        }
+                    }
+                    
+                    if(debug_mode) {
+                        info!(
+                            "send Reveal token 1 from {:?} to {:?}: {:?}",
+                            player_id,
+                            i,
+                            reveal_token1.0 .0.to_string()
+                        );
+                        info!(
+                            "send Reveal token 2 from {:?} to {:?}: {:?}",
+                            player_id,
+                            i,
+                            reveal_token2.0 .0.to_string()
+                        );
+                    }
+
+                    let message = ProtocolMessage::RevealToken(
+                        i as u8,
+                        reveal_token1_bytes,
+                        reveal_token2_bytes,
+                    );
+                    if let Err(e) = send_protocol_message(data_channel, &message) {
+                        error!("Error sending reveal token: {:?}", e);
+                    }
+                }
+            }
+            info!("Shuffle verified");
+            Ok(())
+        }
+        Err(e) => {
+            error!("Error verifying shuffle remask: {:?}", e);
+            Err(Box::new(e))
+        }
+    }
+}
+
+
 pub fn verify_remask_for_reshuffle(
     state: Rc<RefCell<PokerState>>,
     data_channel: RtcDataChannel,
@@ -1191,9 +1487,4 @@ fn send_remask_for_reshuffle(
             Err(Box::new(e))
         }
     }
-}
-
-
-fn is_dealer(current_dealer: u8, player_id: &String) -> bool {
-    current_dealer == player_id.parse::<u8>().unwrap()
 }
