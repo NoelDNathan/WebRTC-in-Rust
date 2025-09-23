@@ -4,6 +4,7 @@ mod sdp;
 mod utils;
 mod websockets;
 mod handle_poker_messages;
+mod handle_frontend_messages;
 
 use std::cell::RefCell;
 use std::rc::Rc;

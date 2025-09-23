@@ -26,6 +26,7 @@ use crate::{
 const STUN_SERVER: &str = "stun:stun.l.google.com:19302";
 const TURN: &str = "turn:192.168.178.60:3478";
 
+let mut poker_state: Option<PokerState> = None;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -395,7 +396,7 @@ pub async fn setup_listener(
         //     dc2.send_with_str("Ping from peer_b.dc!").unwrap();
         // }) as Box<dyn FnMut(RtcDataChannelEvent)>);
 
-        let poker_state = PokerState::default();
+        poker_state = Some(PokerState::default());
 
         let ondatachannel_callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
             let dc2 = ev.channel();

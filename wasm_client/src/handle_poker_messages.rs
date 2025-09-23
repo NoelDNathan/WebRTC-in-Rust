@@ -14,7 +14,6 @@ use ark_groth16::Proof as ZKProof;
 
 
 
-use ark_ff::to_bytes;
 use ark_std::One;
 use babyjubjub::Fr;
 use barnett_smart_card_protocol::BarnettSmartProtocol;
@@ -34,9 +33,9 @@ use std::{
 };
 
 
-const ERROR_PLAYER_ID_NOT_SET: &str = "Player ID should be set";
-const ERROR_NAME_BYTES_NOT_SET: &str = "name_bytes should be set";
-const ERROR_PLAYER_NOT_SET: &str = "Player should be initialized";
+pub const ERROR_PLAYER_ID_NOT_SET: &str = "Player ID should be set";
+pub const ERROR_NAME_BYTES_NOT_SET: &str = "name_bytes should be set";
+pub const ERROR_PLAYER_NOT_SET: &str = "Player should be initialized";
 const ERROR_DECK_NOT_SET: &str = "Deck should be set";
 const ERROR_CARD_MAPPING_NOT_SET: &str = "Card mapping should be set";
 const ERROR_JOINT_PK_NOT_SET: &str = "Joint public key should be set";
@@ -74,16 +73,12 @@ pub struct PublicKeyInfoEncoded {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMessage {
     Text(Vec<u8>),
-    Proof(Vec<u8>),
     RevealToken(u8, Vec<u8>, Vec<u8>),
     RevealTokenCommunityCards(Vec<Vec<u8>>, Vec<u8>),
-    Card(Vec<u8>),
     EncodedCards(Vec<u8>),
     PublicKeyInfo(PublicKeyInfoEncoded),
     ShuffledAndRemaskedCards(Vec<u8>, Vec<u8>),
     RevealAllCards(Vec<Vec<u8>>),
-    Ping(Vec<u8>),
-    Pong(Vec<u8>),
     ZKProofRemoveAndRemaskChunk(u8, u8, Vec<u8>),
     ZKProofRemoveAndRemaskProof(Vec<u8>),
     ZKProofShuffleChunk(u8, u8, Vec<u8>),
@@ -111,11 +106,31 @@ pub fn handle_poker_message(
             }
             ProtocolMessage::PublicKeyInfo(public_key_info) => {
                 handle_public_key_info_received(
-                    public_key_info,
                     state,
                     data_channel,
-                    peer_connection,
+                    public_key_info
                 );
+            }
+            ProtocolMessage::RevealToken(id, reveal_token1_bytes, reveal_token2_bytes) => {
+                handle_reveal_token_received(state, data_channel, id, reveal_token1_bytes, reveal_token2_bytes);
+            }
+            ProtocolMessage::RevealTokenCommunityCards(reveal_token_bytes, index_bytes) => {
+                handle_reveal_token_community_cards_received(state, data_channel, reveal_token_bytes, index_bytes);
+            }
+            ProtocolMessage::Card(data) => {
+                handle_card_received(state, data_channel, data);
+            }
+            ProtocolMessage::EncodedCards(data) => {
+                handle_encoded_cards_received(state, data_channel, data);
+            }
+            ProtocolMessage::PublicKeyInfo(public_key_info) => {
+                handle_public_key_info_received(state, data_channel, public_key_info);
+            }
+            ProtocolMessage::ShuffledAndRemaskedCards(remasked_bytes, proof_bytes) => {
+                handle_shuffled_and_remasked_cards_received(state, data_channel, remasked_bytes, proof_bytes);
+            }
+            ProtocolMessage::RevealAllCards(reveal_all_cards_bytes) => {
+                handle_reveal_all_cards_received(state, data_channel, reveal_all_cards_bytes);
             }
         }
     } else {
@@ -685,25 +700,8 @@ fn handle_zk_proof_shuffle_chunk_received(
             if validate_chunks(&s.public_shuffle_bytes, length) {
                 // Call process_shuffle_verification here
                 match process_shuffle_verification(
-                    &mut prover_shuffle,
-                    &pp,
-                    joint_pk.as_ref().unwrap(),
-                    &mut deck,
-                    &public_shuffle_bytes,
-                    &proof_shuffle_bytes,
-                    &mut current_shuffler,
-                    &player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET),
-                    num_players_expected,
-                    &mut player.as_mut().expect(ERROR_PLAYER_NOT_SET),
-                    &mut connected_peers,
-                    &mut swarm,
-                    &topic,
-                    rng,
-                    m,
-                    n,
-                    Some(&channel),
-                    Some(&verifyShuffling),
-                    Some(&verifyRevealToken),
+                    state,
+                    data_channel,
                 ) {
                     Ok(_) => {
                         info!("Shuffle verification completed");
@@ -1093,7 +1091,7 @@ fn process_reshuffle_verification(
                 Ok(reshuffled_deck) => {
                     let new_reshuffler = s.current_reshuffler + 1;
                     let player_id = s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET);
-                    let pp = 
+                    let pp = s.poker_params.pp;
                     if is_dealer(new_reshuffler, player_id) {
                         let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
@@ -1140,7 +1138,7 @@ fn process_reshuffle_verification(
                             }
                             Err(e) => {
                                 error!("Error sending remask for reshuffle: {:?}", e);
-                                Err(e.into())
+                                Err(e.into());
                             }
                         }
                     } 
@@ -1315,7 +1313,7 @@ fn process_shuffle_verification(
                         }
                     }
                     
-                    if(debug_mode) {
+                    if debug_mode {
                         info!(
                             "send Reveal token 1 from {:?} to {:?}: {:?}",
                             player_id,
