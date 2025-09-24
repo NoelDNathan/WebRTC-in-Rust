@@ -44,7 +44,7 @@ pub fn send_public_key(state: Rc<RefCell<PokerState>>, player_address: String) {
     let s_str = format!("{:?}", player_clone.proof_key.opening.to_string());
 
     let public_key_value = format!("{:?}", player_clone.pk.to_string());
-    verify_public_key_clone.call3(
+    let _ = verify_public_key_clone.call3(
         &JsValue::NULL,
         &JsValue::from_str(&public_key_value),
         &JsValue::from_str(&r),

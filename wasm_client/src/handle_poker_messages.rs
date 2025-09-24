@@ -50,9 +50,9 @@ const NUM_PLAYERS_EXPECTED: usize = 2;
 const DEBUG_MODE: bool = true;
 
 use texas_holdem::{
-    encode_cards_ext, generate_list_of_cards, open_card, Bn254Fr, Card,
-    CardProtocol, InternalPlayer, MaskedCard, ProofKeyOwnership, PublicKey,
-    RemaskingProof, RevealProof, RevealToken, Scalar, ZKProofShuffle,
+    encode_cards_ext, generate_list_of_cards, open_card, Bn254Fr, Card, CardProtocol,
+    InternalPlayer, MaskedCard, ProofKeyOwnership, PublicKey, RemaskingProof, RevealProof,
+    RevealToken, Scalar, ZKProofShuffle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -376,10 +376,16 @@ fn handle_shuffled_and_remasked_cards_received(
                                         &reveal_token2_bytes,
                                     )?;
 
+                                // Wrap the proofs in Rc
+                                let new_token1_rc =
+                                    (new_token1.0, Rc::new(new_token1.1), new_token1.2);
+                                let new_token2_rc =
+                                    (new_token2.0, Rc::new(new_token2.1), new_token2.2);
+
                                 info!("Pushing reveal tokens to player {}", i);
 
-                                player_info.reveal_tokens[0].push(new_token1);
-                                player_info.reveal_tokens[1].push(new_token2);
+                                player_info.reveal_tokens[0].push(new_token1_rc);
+                                player_info.reveal_tokens[1].push(new_token2_rc);
 
                                 info!(
                                     "send Reveal token 1 from {:?} to {:?}: {:?}",
@@ -445,6 +451,10 @@ fn handle_reveal_token_received(
         deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token2_bytes)
             .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
 
+    // Wrap the proofs in Rc
+    let reveal_token1_rc = (reveal_token1.0, Rc::new(reveal_token1.1), reveal_token1.2);
+    let reveal_token2_rc = (reveal_token2.0, Rc::new(reveal_token2.1), reveal_token2.2);
+
     let pp = s.pp.clone();
 
     if id
@@ -458,8 +468,8 @@ fn handle_reveal_token_received(
             Some((_, player_info)) => {
                 info!("Received reveal token from player {}", id);
                 info!("Received reveal token from player {}", id);
-                player_info.reveal_tokens[0].push(reveal_token1);
-                player_info.reveal_tokens[1].push(reveal_token2);
+                player_info.reveal_tokens[0].push(reveal_token1_rc);
+                player_info.reveal_tokens[1].push(reveal_token2_rc);
 
                 // the player himself is not counted, only the other players
                 if player_info.reveal_tokens[0].len() == num_players_connected - 1 {
@@ -468,20 +478,38 @@ fn handle_reveal_token_received(
                     let card1 = player_info.cards[0];
                     let card2 = player_info.cards[1];
                     if let (Some(card1), Some(card2)) = (card1, card2) {
-                        match CardProtocol::partial_unmask(
-                            &pp,
-                            &player_info.reveal_tokens[0],
-                            &card1,
-                        ) {
+                        // Convert Rc<RevealProof> back to RevealProof for the function call
+                        let tokens_for_unmask: Vec<(RevealToken, RevealProof, PublicKey)> =
+                            player_info.reveal_tokens[0]
+                                .iter()
+                                .map(|(token, proof_rc, key)| {
+                                    (
+                                        token.clone(),
+                                        Rc::try_unwrap(proof_rc.clone())
+                                            .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                                        key.clone(),
+                                    )
+                                })
+                                .collect();
+                        match CardProtocol::partial_unmask(&pp, &tokens_for_unmask, &card1) {
                             Ok(opened_card1) => player_info.cards_public[0] = Some(opened_card1),
                             Err(e) => error!("Error al revelar la carta 1: {:?}", e),
                         }
 
-                        match CardProtocol::partial_unmask(
-                            &pp,
-                            &player_info.reveal_tokens[1],
-                            &card2,
-                        ) {
+                        // Convert Rc<RevealProof> back to RevealProof for the function call
+                        let tokens_for_unmask2: Vec<(RevealToken, RevealProof, PublicKey)> =
+                            player_info.reveal_tokens[1]
+                                .iter()
+                                .map(|(token, proof_rc, key)| {
+                                    (
+                                        token.clone(),
+                                        Rc::try_unwrap(proof_rc.clone())
+                                            .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                                        key.clone(),
+                                    )
+                                })
+                                .collect();
+                        match CardProtocol::partial_unmask(&pp, &tokens_for_unmask2, &card2) {
                             Ok(opened_card2) => player_info.cards_public[1] = Some(opened_card2),
                             Err(e) => error!("Error al revelar la carta 2: {:?}", e),
                         }
@@ -501,8 +529,8 @@ fn handle_reveal_token_received(
             s.received_reveal_tokens1.len()
         );
     }
-    s.received_reveal_tokens1.push(reveal_token1);
-    s.received_reveal_tokens2.push(reveal_token2);
+    s.received_reveal_tokens1.push(reveal_token1_rc);
+    s.received_reveal_tokens2.push(reveal_token2_rc);
 
     // the player himself is not counted, only the other players
     if s.received_reveal_tokens2.len() == num_players_connected - 1 {
@@ -520,10 +548,36 @@ fn handle_reveal_token_received(
         // Peek at both cards first
         let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
 
+        // Convert Rc<RevealProof> back to RevealProof for the function call
+        let mut tokens_for_peek1: Vec<(RevealToken, RevealProof, PublicKey)> = s
+            .received_reveal_tokens1
+            .iter()
+            .map(|(token, proof_rc, key)| {
+                (
+                    token.clone(),
+                    Rc::try_unwrap(proof_rc.clone())
+                        .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    key.clone(),
+                )
+            })
+            .collect();
+        let mut tokens_for_peek2: Vec<(RevealToken, RevealProof, PublicKey)> = s
+            .received_reveal_tokens2
+            .iter()
+            .map(|(token, proof_rc, key)| {
+                (
+                    token.clone(),
+                    Rc::try_unwrap(proof_rc.clone())
+                        .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    key.clone(),
+                )
+            })
+            .collect();
+
         let card1_result = {
             player.peek_at_card(
                 &pp,
-                &mut s.received_reveal_tokens1,
+                &mut tokens_for_peek1,
                 &card_mapping,
                 &deck[index1 as usize],
             )
@@ -532,7 +586,7 @@ fn handle_reveal_token_received(
         let card2_result = {
             player.peek_at_card(
                 &pp,
-                &mut s.received_reveal_tokens2,
+                &mut tokens_for_peek2,
                 &card_mapping,
                 &deck[index2 as usize],
             )
@@ -593,7 +647,10 @@ fn handle_reveal_token_community_cards_received(
         let token =
             deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(token_bytes.as_slice())
                 .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
-        s.community_cards_tokens[index].push(token);
+
+        // Wrap the proof in Rc
+        let token_rc = (token.0, Rc::new(token.1), token.2);
+        s.community_cards_tokens[index].push(token_rc);
 
         // the player himself is not counted, only the other players
         if s.community_cards_tokens[index].len() == s.num_players_connected - 1 {
@@ -604,13 +661,23 @@ fn handle_reveal_token_community_cards_received(
             let mut rng = StdRng::from_entropy();
             match player.compute_reveal_token(&mut rng, &pp, &deck[index]) {
                 Ok(token) => {
-                    s.community_cards_tokens[index].push(token);
-                    match open_card(
-                        &pp,
-                        &s.community_cards_tokens[index],
-                        &card_mapping,
-                        &deck[index],
-                    ) {
+                    // Wrap the proof in Rc
+                    let token_rc = (token.0, Rc::new(token.1), token.2);
+                    s.community_cards_tokens[index].push(token_rc);
+                    // Convert Rc<RevealProof> back to RevealProof for the function call
+                    let tokens_for_open: Vec<(RevealToken, RevealProof, PublicKey)> = s
+                        .community_cards_tokens[index]
+                        .iter()
+                        .map(|(token, proof_rc, key)| {
+                            (
+                                token.clone(),
+                                Rc::try_unwrap(proof_rc.clone())
+                                    .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                                key.clone(),
+                            )
+                        })
+                        .collect();
+                    match open_card(&pp, &tokens_for_open, &card_mapping, &deck[index]) {
                         Ok(card) => {
                             info!("Community Card{:?}: {:?}", index, card);
 
@@ -659,8 +726,24 @@ fn handle_reveal_all_cards_received(
         )
         .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
         let player_token = player.compute_reveal_token(&mut rng, &pp, &deck[i as usize])?;
-        let tokens = vec![reveal_token, player_token];
-        let card = open_card(&pp, &tokens, &card_mapping, &deck[i as usize])?;
+
+        // Wrap the proofs in Rc
+        let reveal_token_rc = (reveal_token.0, Rc::new(reveal_token.1), reveal_token.2);
+        let player_token_rc = (player_token.0, Rc::new(player_token.1), player_token.2);
+        let tokens = vec![reveal_token_rc, player_token_rc];
+        // Convert Rc<RevealProof> back to RevealProof for the function call
+        let tokens_for_open: Vec<(RevealToken, RevealProof, PublicKey)> = tokens
+            .iter()
+            .map(|(token, proof_rc, key)| {
+                (
+                    token.clone(),
+                    Rc::try_unwrap(proof_rc.clone())
+                        .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    key.clone(),
+                )
+            })
+            .collect();
+        let card = open_card(&pp, &tokens_for_open, &card_mapping, &deck[i as usize])?;
     }
     Ok(())
 }
@@ -951,7 +1034,7 @@ fn shuffle_remask_and_send(
         &mut r_prime,
         &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
-        &s.new_deck.as_ref().expect(ERROR_DECK_NOT_SET).to_vec(),
+        &new_deck,
     ) {
         Ok((public, proof)) => {
             if DEBUG_MODE {
@@ -1130,11 +1213,7 @@ fn process_reshuffle_verification(
             match verify_remask_for_reshuffle(s, player_cards, &player_pk) {
                 Ok(reshuffled_deck) => {
                     let new_reshuffler = s.current_reshuffler + 1;
-                    let player_id = s
-                        .my_player_id
-                        .as_ref()
-                        .expect(ERROR_PLAYER_ID_NOT_SET)
-                        .clone();
+                    let player_id = s.my_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).clone();
                     if is_dealer(new_reshuffler, &player_id) {
                         let card_mapping =
                             s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
@@ -1236,7 +1315,7 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
             s.current_shuffler += 1;
 
             if s.current_shuffler
-                == s.my_player_id
+                == s.my_id
                     .as_ref()
                     .expect(ERROR_PLAYER_ID_NOT_SET)
                     .parse::<u8>()
@@ -1258,7 +1337,7 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                 s.current_shuffler = 0;
                 info!("All players shuffled, revealing cards");
                 let id = s
-                    .my_player_id
+                    .my_id
                     .as_ref()
                     .expect(ERROR_PLAYER_ID_NOT_SET)
                     .parse::<u8>()
@@ -1335,7 +1414,7 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                     for arg in args {
                         args_array.push(&arg);
                     }
-                    verify_reveal_token_clone.apply(&JsValue::NULL, &args_array);
+                    let _ = verify_reveal_token_clone.apply(&JsValue::NULL, &args_array);
 
                     let new_token1 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
                         &reveal_token1_bytes,
@@ -1344,13 +1423,17 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                         &reveal_token2_bytes,
                     )?;
 
+                    // Wrap the proofs in Rc
+                    let new_token1_rc = (new_token1.0, Rc::new(new_token1.1), new_token1.2);
+                    let new_token2_rc = (new_token2.0, Rc::new(new_token2.1), new_token2.2);
+
                     info!("Pushing reveal tokens to player {}", i);
 
                     match find_player_by_id(&mut s.players_connected, i as u8) {
-                        Some((peer_id, player_info)) => {
+                        Some((_, player_info)) => {
                             player_info.cards = [Some(card1), Some(card2)];
-                            player_info.reveal_tokens[0].push(new_token1);
-                            player_info.reveal_tokens[1].push(new_token2);
+                            player_info.reveal_tokens[0].push(new_token1_rc);
+                            player_info.reveal_tokens[1].push(new_token2_rc);
                         }
                         None => {
                             error!("Player with id {} not found", i);

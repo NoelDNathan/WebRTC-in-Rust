@@ -2,8 +2,14 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 use std::rc::Rc;
 
+use barnett_smart_card_protocol::BarnettSmartProtocol;
 use js_sys::{Array, Object, Promise, Reflect};
 use log::{debug, error, info, warn};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+use std::collections::HashMap;
+use std::default::Default;
+use texas_holdem::{generator, CardProtocol};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue, UnwrapThrowExt};
 use web_sys::{
@@ -16,7 +22,88 @@ use web_sys::{
 use shared_protocol::{SessionID, SignalEnum, UserID};
 
 use crate::handle_poker_messages::handle_poker_message;
-use crate::poker_state::PokerState;
+use crate::poker_state::{PokerState, Provers};
+use zk_reshuffle::CircomProver;
+
+// Global poker state storage using thread_local!
+std::thread_local! {
+    static POKER_STATE: RefCell<Option<Rc<RefCell<PokerState>>>> = RefCell::new(None);
+}
+
+// Helper functions to manage the global poker state
+pub fn init_poker_state() {
+    POKER_STATE.with(|state| {
+        if state.borrow().is_none() {
+            *state.borrow_mut() = Some(Rc::new(RefCell::new(create_poker_state())));
+            info!("Poker state initialized successfully");
+        } else {
+            info!("Poker state already initialized, skipping initialization");
+        }
+    });
+}
+
+fn create_poker_state() -> PokerState {
+    let mut rng = StdRng::from_entropy();
+    let gen = generator();
+    let pp = CardProtocol::setup(&mut rng, gen, 2, 26).expect("Failed to setup CardParameters");
+
+    let prover_reshuffle = CircomProver::new(
+        "../../circom-circuit/card_cancellation/card_cancellation_v5.wasm",
+        "../../circom-circuit/card_cancellation/card_cancellation_v5.r1cs",
+        "../../circom-circuit/card_cancellation/card_cancellation_v5_0001.zkey",
+    )
+    .expect("prover_reshuffle failed");
+
+    let prover_shuffle = CircomProver::new(
+        "../../circom-circuit/shuffling/shuffling.wasm",
+        "../../circom-circuit/shuffling/shuffling.r1cs",
+        "../../circom-circuit/shuffling/shuffling_0001.zkey",
+    )
+    .expect("prover_shuffle failed");
+
+    let provers = Provers {
+        prover_reshuffle,
+        prover_shuffle,
+    };
+
+    PokerState {
+        room_id: None,
+        my_id: None,
+        pp,
+        my_name: None,
+        my_name_bytes: None,
+        my_player: None,
+        pk_proof_info_array: Vec::new(),
+        joint_pk: None,
+        card_mapping: None,
+        deck: None,
+        provers: provers,
+        current_dealer: 0,
+        num_players_connected: 1,
+        current_shuffler: 0,
+        current_reshuffler: 0,
+        received_reveal_tokens1: Vec::new(),
+        received_reveal_tokens2: Vec::new(),
+        community_cards_tokens: vec![Vec::new(); 5],
+        players_connected: HashMap::new(),
+        public_reshuffle_bytes: Vec::new(),
+        proof_reshuffle_bytes: Vec::new(),
+        is_reshuffling: false,
+        is_all_public_reshuffle_bytes_received: false,
+        verify_public_key: js_sys::Function::new_no_args(""),
+        verify_shuffling: js_sys::Function::new_no_args(""),
+        verify_reveal_token: js_sys::Function::new_no_args(""),
+        set_private_cards: js_sys::Function::new_no_args(""),
+        set_community_card: js_sys::Function::new_no_args(""),
+        public_shuffle_bytes: Vec::new(),
+        proof_shuffle_bytes: Vec::new(),
+        is_all_public_shuffle_bytes_received: false,
+    }
+}
+
+pub fn get_poker_state() -> Option<Rc<RefCell<PokerState>>> {
+    POKER_STATE.with(|state| state.borrow().as_ref().map(|s| s.clone()))
+}
 
 use crate::{
     create_sdp_offer, receive_sdp_answer, receive_sdp_offer_send_answer,
@@ -25,8 +112,6 @@ use crate::{
 
 const STUN_SERVER: &str = "stun:stun.l.google.com:19302";
 const TURN: &str = "turn:192.168.178.60:3478";
-
-let mut poker_state: Option<PokerState> = None;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -396,20 +481,30 @@ pub async fn setup_listener(
         //     dc2.send_with_str("Ping from peer_b.dc!").unwrap();
         // }) as Box<dyn FnMut(RtcDataChannelEvent)>);
 
-        poker_state = Some(PokerState::default());
+        init_poker_state();
 
+        let peer_b_clone_for_datachannel = peer_b_clone_external.clone();
         let ondatachannel_callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
             let dc2 = ev.channel();
             info!("peer_b.ondatachannel! : {}", dc2.label());
+            let peer_b_clone_for_inner = peer_b_clone_for_datachannel.clone();
+            let dc2_clone = dc2.clone();
             let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
                 if let Some(message) = ev.data().as_string() {
-                    handle_poker_message(message, poker_state.clone(), dc2.clone(), peer_b_clone.clone());
+                    if let Some(poker_state) = get_poker_state() {
+                        handle_poker_message(
+                            message,
+                            poker_state,
+                            dc2_clone.clone(),
+                            peer_b_clone_for_inner.clone(),
+                        );
+                    }
                 }
             }) as Box<dyn FnMut(MessageEvent)>);
             dc2.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
             onmessage_callback.forget();
-        }) as Box<dyn FnMut(RtcDataChannelEvent)>);
-        
+        })
+            as Box<dyn FnMut(RtcDataChannelEvent)>);
 
         peer_b_clone.set_ondatachannel(Some(ondatachannel_callback.as_ref().unchecked_ref()));
         ondatachannel_callback.forget();
@@ -466,7 +561,6 @@ fn host_session(ws: WebSocket) {
     }
 }
 
-
 pub async fn setup_initiator(
     peer_a: RtcPeerConnection,
     websocket: WebSocket,
@@ -489,18 +583,25 @@ pub async fn setup_initiator(
     info!("dc1 created: label {:?}", dc1.label());
 
     let dc1_clone = dc1.clone();
+    let peer_a_clone_for_callback = peer_a_clone_external.clone();
+
+    init_poker_state();
 
     let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
         if let Some(message) = ev.data().as_string() {
-            handle_poker_message(message, poker_state.clone(), dc1_clone, peer_a_clone_external);
+            if let Some(poker_state) = get_poker_state() {
+                handle_poker_message(
+                    message,
+                    poker_state,
+                    dc1_clone.clone(),
+                    peer_a_clone_for_callback.clone(),
+                );
+            }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
 
-
     dc1.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
     onmessage_callback.forget();
-
-    
 
     let btn_cb = Closure::wrap(Box::new(move || {
         let ws_clone = ws_clone_external.clone();
