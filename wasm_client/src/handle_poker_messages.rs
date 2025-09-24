@@ -93,30 +93,31 @@ pub fn handle_poker_message(
                 }
             }
             ProtocolMessage::PublicKeyInfo(public_key_info) => {
+                info!("Received public key info");
                 handle_public_key_info_received(
                     state,
                     peer_connection,
                     data_channel,
                     public_key_info,
-                );
+                )
             }
             ProtocolMessage::RevealToken(id, reveal_token1_bytes, reveal_token2_bytes) => {
+                info!("Received reveal token");
                 handle_reveal_token_received(state, id, reveal_token1_bytes, reveal_token2_bytes);
             }
             ProtocolMessage::RevealTokenCommunityCards(reveal_token_bytes, index_bytes) => {
-                handle_reveal_token_community_cards_received(
-                    state,
-                    reveal_token_bytes,
-                    index_bytes,
-                );
+                info!("Received reveal token community cards");
+                handle_reveal_token_community_cards_received(state, reveal_token_bytes, index_bytes)
             }
 
             ProtocolMessage::EncodedCards(data) => {
+                info!("Received encoded cards");
                 if let Err(e) = handle_encoded_cards_received(state, data) {
                     error!("Error handling encoded cards: {:?}", e);
                 }
             }
             ProtocolMessage::ShuffledAndRemaskedCards(remasked_bytes, proof_bytes) => {
+                info!("Received shuffled and remasked cards");
                 if let Err(e) =
                     handle_shuffled_and_remasked_cards_received(state, remasked_bytes, proof_bytes)
                 {
@@ -124,6 +125,7 @@ pub fn handle_poker_message(
                 }
             }
             ProtocolMessage::RevealAllCards(reveal_all_cards_bytes) => {
+                info!("Received reveal all cards");
                 if let Err(e) = handle_reveal_all_cards_received(state, reveal_all_cards_bytes) {
                     error!("Error handling reveal all cards: {:?}", e);
                 }
@@ -134,10 +136,12 @@ pub fn handle_poker_message(
                     "Received ZK proof remove and remask chunk: i={}, length={}",
                     i, length
                 );
+                handle_zk_proof_remove_and_remask_chunk_received(state, i, length, chunk);
             }
             ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes) => {
                 // Handle ZK proof remove and remask proof
                 info!("Received ZK proof remove and remask proof");
+                handle_zk_proof_remove_and_remask_proof_received(state, proof_bytes);
             }
             ProtocolMessage::ZKProofShuffleChunk(i, length, chunk) => {
                 // Handle ZK proof shuffle chunk
@@ -145,10 +149,12 @@ pub fn handle_poker_message(
                     "Received ZK proof shuffle chunk: i={}, length={}",
                     i, length
                 );
+                handle_zk_proof_shuffle_chunk_received(state, i, length, chunk);
             }
             ProtocolMessage::ZKProofShuffleProof(proof_bytes) => {
                 // Handle ZK proof shuffle proof
                 info!("Received ZK proof shuffle proof");
+                handle_zk_proof_shuffle_proof_received(state, proof_bytes);
             }
         }
     } else {
@@ -830,6 +836,24 @@ fn handle_zk_proof_shuffle_chunk_received(
                 }
             }
         }
+    }
+}
+
+fn handle_zk_proof_shuffle_proof_received(state: Rc<RefCell<PokerState>>, proof_bytes: Vec<u8>) {
+    let mut s = state.borrow_mut();
+    s.proof_shuffle_bytes = proof_bytes;
+
+    if s.is_all_public_shuffle_bytes_received {
+        match process_shuffle_verification(&mut *s) {
+            Ok(_) => {
+                info!("Shuffle verification completed");
+            }
+            Err(e) => {
+                error!("Error in shuffle verification: {:?}", e);
+            }
+        }
+    } else {
+        info!("Not all public shuffle bytes received yet");
     }
 }
 
