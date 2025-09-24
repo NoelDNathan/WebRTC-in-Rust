@@ -21,7 +21,7 @@ wasm-bindgen = { version = "0.2.88", features = ["serde-serialize"] }
 wasm-logger = "0.2.0"
 wasm-bindgen-futures = "0.4.20"
 
-texas-holdem = {path = "../texas-holdem"}
+texas-holdem = {path = "../../texas-holdem"}
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires

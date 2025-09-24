@@ -100,10 +100,6 @@ pub fn handle_poker_message(
                     add_message_to_chat(&format!("Peer: {}", text));
                 }
             }
-            ProtocolMessage::Proof(data) => {
-                info!("Received proof message: {:?}", data);
-                // Procesar la prueba aquí
-            }
             ProtocolMessage::PublicKeyInfo(public_key_info) => {
                 handle_public_key_info_received(
                     state,
@@ -112,25 +108,22 @@ pub fn handle_poker_message(
                 );
             }
             ProtocolMessage::RevealToken(id, reveal_token1_bytes, reveal_token2_bytes) => {
-                handle_reveal_token_received(state, data_channel, id, reveal_token1_bytes, reveal_token2_bytes);
+                handle_reveal_token_received(state, id, reveal_token1_bytes, reveal_token2_bytes);
             }
             ProtocolMessage::RevealTokenCommunityCards(reveal_token_bytes, index_bytes) => {
-                handle_reveal_token_community_cards_received(state, data_channel, reveal_token_bytes, index_bytes);
+                handle_reveal_token_community_cards_received(state, reveal_token_bytes, index_bytes);
             }
             ProtocolMessage::Card(data) => {
-                handle_card_received(state, data_channel, data);
+                handle_card_received(state, data);
             }
             ProtocolMessage::EncodedCards(data) => {
-                handle_encoded_cards_received(state, data_channel, data);
-            }
-            ProtocolMessage::PublicKeyInfo(public_key_info) => {
-                handle_public_key_info_received(state, data_channel, public_key_info);
+                handle_encoded_cards_received(state, data);
             }
             ProtocolMessage::ShuffledAndRemaskedCards(remasked_bytes, proof_bytes) => {
-                handle_shuffled_and_remasked_cards_received(state, data_channel, remasked_bytes, proof_bytes);
+                handle_shuffled_and_remasked_cards_received(state, remasked_bytes, proof_bytes);
             }
             ProtocolMessage::RevealAllCards(reveal_all_cards_bytes) => {
-                handle_reveal_all_cards_received(state, data_channel, reveal_all_cards_bytes);
+                handle_reveal_all_cards_received(state, reveal_all_cards_bytes);
             }
         }
     } else {
@@ -214,7 +207,7 @@ fn handle_public_key_info_received(
 
                     if is_dealer(s.current_dealer, &player_id) {
                         info!("All players connected, starting game");
-                        dealt_cards(state, data_channel);
+                        dealt_cards(state);
                     }
                 }
                 Err(e) => error!("Error computing aggregate key: {:?}", e),
@@ -225,7 +218,6 @@ fn handle_public_key_info_received(
 
 fn handle_encoded_cards_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     encoded_cards: Vec<u8>,
 ) {
     let s = state.borrow_mut();
@@ -262,7 +254,6 @@ fn handle_encoded_cards_received(
 
 fn handle_shuffled_and_remasked_cards_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     remasked_bytes: Vec<u8>,
     proof_bytes: Vec<u8>,
 ) {
@@ -383,7 +374,7 @@ fn handle_shuffled_and_remasked_cards_received(
                                         reveal_token1_bytes,
                                         reveal_token2_bytes,
                                     );
-                                    if let Err(e) = send_protocol_message(data_channel, &message) {
+                                    if let Err(e) = send_protocol_message(state, &message) {
                                         error!("Error sending reveal token: {:?}", e);
                                     }
                                 }
@@ -403,7 +394,6 @@ fn handle_shuffled_and_remasked_cards_received(
 
 fn handle_reveal_token_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     id: u8,
     reveal_token1_bytes: Vec<u8>,
     reveal_token2_bytes: Vec<u8>,
@@ -536,7 +526,6 @@ fn handle_reveal_token_received(
 
 fn handle_reveal_token_community_cards_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     reveal_token_bytes: Vec<u8>,
     index_bytes: Vec<u8>,
 ) {
@@ -590,7 +579,6 @@ fn handle_reveal_token_community_cards_received(
 
 fn handle_reveal_all_cards_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     reveal_all_cards_bytes: Vec<u8>,
 ) {
     
@@ -614,7 +602,6 @@ fn handle_reveal_all_cards_received(
 
 fn handle_zk_proof_remove_and_remask_chunk_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     i: u8,
     length: u8,
     chunk: Vec<u8>,
@@ -635,7 +622,6 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
 
             match process_reshuffle_verification(
                 state,
-                data_channel
             ){
                 Ok((reshuffled_deck, new_reshuffler)) => {
                     s.deck = Some(reshuffled_deck);
@@ -655,7 +641,6 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
 
 fn handle_zk_proof_remove_and_remask_proof_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     proof_bytes: Vec<u8>,
 ) {
     let s = state.borrow_mut();
@@ -665,7 +650,6 @@ fn handle_zk_proof_remove_and_remask_proof_received(
     if is_all_public_reshuffle_bytes_received {
         match process_reshuffle_verification(
             state,
-            data_channel
         ) {
             Ok((reshuffled_deck, new_reshuffler)) => {
                 s.deck = Some(reshuffled_deck);
@@ -701,7 +685,6 @@ fn handle_zk_proof_shuffle_chunk_received(
                 // Call process_shuffle_verification here
                 match process_shuffle_verification(
                     state,
-                    data_channel,
                 ) {
                     Ok(_) => {
                         info!("Shuffle verification completed");
@@ -721,23 +704,34 @@ fn handle_zk_proof_shuffle_chunk_received(
 // -----------------------------HELPER FUNCTIONS-----------------------------
 
 pub fn send_protocol_message(
-    data_channel: &RtcDataChannel,
+    state: Rc<RefCell<PokerState>>,
     message: ProtocolMessage,
 ) -> Result<(), JsValue> {
-    // Verify that the DataChannel is open
-    if data_channel.ready_state() != web_sys::RtcDataChannelState::Open {
-        return Err(JsValue::from_str("DataChannel is not open"));
-    }
+    let s = state.borrow();
 
     // Serialize the message
     let serialized_message = serde_json_wasm::to_string(&message)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {:?}", e)))?;
 
-    // Send the message
-    data_channel
-        .send_with_str(&serialized_message)
-        .map_err(|e| JsValue::from_str(&format!("Send error: {:?}", e)))?;
-
+    let mut errors = Vec::new();
+    
+    // Send to all connected players
+    let s = state.borrow();
+    for (peer_connection, player_info) in &s.players_connected {
+        if player_info.data_channel.ready_state() == web_sys::RtcDataChannelState::Open {
+            if let Err(e) = player_info.data_channel.send_with_str(&serialized_message) {
+                errors.push(format!("Error sending to player {}: {:?}", player_info.id, e));
+            } else {
+                info!("Message sent successfully to player {}", player_info.id);
+            }
+        } else {
+            errors.push(format!("DataChannel not open for player {}", player_info.id));
+        }
+    }
+    
+    if !errors.is_empty() {
+        return Err(JsValue::from_str(&format!("Broadcast errors: {:?}", errors)));
+    }
     info!("ProtocolMessage sent successfully: {:?}", message);
     Ok(())
 }
@@ -803,7 +797,6 @@ fn deserialize_chunks(chunks: &[(u8, Vec<u8>)]) -> Result<Vec<String>, Box<dyn E
 
 fn dealt_cards(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
 ) -> Result<(), Box<dyn Error>> {
     let s = state.borrow_mut();
 
@@ -815,7 +808,7 @@ fn dealt_cards(
 
     let card_mapping_bytes = serialize_canonical(&list_of_cards)?;
     if let Err(e) = send_protocol_message(
-        data_channel,
+        state,
         &ProtocolMessage::EncodedCards(card_mapping_bytes),
     ) {
         error!("Error sending encoded cards: {:?}", e);
@@ -840,7 +833,7 @@ fn dealt_cards(
     }
 
     let shuffled_deck =
-        shuffle_remask_and_send(state, &data_channel, &deck).expect(ERROR_SHUFFLE_REMASK_FAILDED);
+        shuffle_remask_and_send(state, &deck).expect(ERROR_SHUFFLE_REMASK_FAILDED);
 
     s.deck = Some(shuffled_deck.clone());
     s.card_mapping = Some(card_mapping);
@@ -851,7 +844,6 @@ fn dealt_cards(
 #[allow(non_snake_case)]
 fn shuffle_remask_and_send(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     new_deck: &Vec<MaskedCard>,
 ) -> Result<Vec<MaskedCard>, Box<dyn Error>> {
     let s = state.borrow_mut();
@@ -866,8 +858,7 @@ fn shuffle_remask_and_send(
             s.new_deck.as_ref().unwrap().len()
         );
         info!(
-            "DEBUG: Channel available: {}, verifyShuffling available: {}",
-            data_channel.is_some(),
+            "DEBUG: verifyShuffling available: {}",
             s.verify_shuffling.is_some()
         );
         info!("send shuffled and remasked cards");
@@ -958,7 +949,7 @@ fn shuffle_remask_and_send(
                     );
                 }
                 if let Err(e) = send_protocol_message(
-                    data_channel,
+                    state,
                     &ProtocolMessage::ZKProofShuffleChunk(i as u8, length as u8, chunk.clone()),
                 ) {
                     if debug_mode {
@@ -981,7 +972,7 @@ fn shuffle_remask_and_send(
             }
 
             if let Err(e) = send_protocol_message(
-                data_channel,
+                state,
                 &ProtocolMessage::ZKProofShuffleProof(proof_bytes),
             ) {
                 if debug_mode {
@@ -1067,7 +1058,6 @@ fn shuffle_remask_and_send(
 
 fn process_reshuffle_verification(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel
 ) -> Result<(Vec<MaskedCard>, u8), Box<dyn Error>> {
 
     let s = state.borrow_mut();
@@ -1084,7 +1074,6 @@ fn process_reshuffle_verification(
 
             match verify_remask_for_reshuffle(
                 state,
-                data_channel,
                 player_cards,
                 &player_info.pk
             ) {
@@ -1100,7 +1089,6 @@ fn process_reshuffle_verification(
                         let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
                         match send_remask_for_reshuffle(
                             state,
-                            data_channel,
                             &reshuffled_deck,
                             player,
                             &m_list,
@@ -1128,7 +1116,7 @@ fn process_reshuffle_verification(
                                     if is_dealer(s.current_dealer, player_id) {
                                         info!("Starting shuffling and remasking");
                                         let shuffled_deck = shuffle_remask_and_send(
-                                            state, data_channel, final_deck
+                                            state, final_deck
                                         )?;
                                         return Ok((shuffled_deck, new_reshuffler));
                                     }
@@ -1161,7 +1149,6 @@ fn process_reshuffle_verification(
 #[allow(non_snake_case)]
 fn process_shuffle_verification(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
 ) -> Result<(), Box<dyn Error>> {
     let s = state.borrow_mut();
     let public_strings = deserialize_chunks(s.public_shuffle_bytes)?;
@@ -1203,7 +1190,6 @@ fn process_shuffle_verification(
                 // Call shuffle_remask_and_send as before
                 match shuffle_remask_and_send(
                     state,
-                    data_channel,
                     &shuffled_deck,
                 ) {
                     Ok(new_deck) => {
@@ -1333,7 +1319,7 @@ fn process_shuffle_verification(
                         reveal_token1_bytes,
                         reveal_token2_bytes,
                     );
-                    if let Err(e) = send_protocol_message(data_channel, &message) {
+                    if let Err(e) = send_protocol_message(state, &message) {
                         error!("Error sending reveal token: {:?}", e);
                     }
                 }
@@ -1351,7 +1337,6 @@ fn process_shuffle_verification(
 
 pub fn verify_remask_for_reshuffle(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     player_cards: Vec<MaskedCard>,
     player_pk: &PublicKey,
 
@@ -1404,7 +1389,6 @@ pub fn verify_remask_for_reshuffle(
 
 fn send_remask_for_reshuffle(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     new_deck: &Vec<MaskedCard>,
     player: &InternalPlayer,
     m_list: &Vec<Card>,
@@ -1456,7 +1440,7 @@ fn send_remask_for_reshuffle(
 
             for (i, chunk) in serialized_chunks.iter().enumerate() {
                 if let Err(e) = send_protocol_message(
-                    data_channel,
+                    state,
                     &ProtocolMessage::ZKProofRemoveAndRemaskChunk(
                         i as u8,
                         length as u8,
@@ -1471,7 +1455,7 @@ fn send_remask_for_reshuffle(
             // Enviar la prueba por separado
             let proof_bytes = serialize_proof(&proof)?;
             if let Err(e) = send_protocol_message(
-                    data_channel,
+                    state,
                 &ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes),
             ) {
                 error!("Error sending zk proof: {:?}", e);

@@ -108,7 +108,7 @@ pub struct PokerState {
 
 
 
-    pub phase: GamePhase,
+    // pub phase: GamePhase,
 }
 
 #[derive(Debug, Clone)]
@@ -120,8 +120,7 @@ pub struct PlayerInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GamePhase { Lobby, Dealing, Reveal, Showdown }
-impl Default for GamePhase { fn default() -> Self { GamePhase::Lobby } }
+pub enum GamePhase { Flop, Turn, River, Showdown }
 
 impl PokerParams {
     pub fn new(m: usize, n: usize) -> Self {
