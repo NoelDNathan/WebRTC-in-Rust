@@ -1,42 +1,34 @@
 use crate::common::add_message_to_chat;
-use crate::poker_state::PokerState;
+use crate::poker_state::{PlayerInfo, PokerState};
 use ark_ff::to_bytes;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use log::{error, info, warn};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
-use zk_reshuffle::{deserialize_proof, serialize_proof, CircomProver, Proof as ZKProofCardRemoval};
-use ark_groth16::Proof as ZKProof;
-
-
-
-
+use web_sys::{RtcDataChannel, RtcPeerConnection};
+use zk_reshuffle::{deserialize_proof, serialize_proof, Proof as ZKProofCardRemoval};
 
 use ark_std::One;
-use babyjubjub::Fr;
 use barnett_smart_card_protocol::BarnettSmartProtocol;
-use futures::stream::StreamExt;
 
 use proof_essentials::utils::permutation::Permutation;
-use proof_essentials::utils::rand::sample_vector;
 
-use regex::Regex;
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::{
     collections::hash_map::DefaultHasher,
     error::Error,
     hash::{Hash, Hasher},
-    time::{Duration, Instant},
 };
-
 
 pub const ERROR_PLAYER_ID_NOT_SET: &str = "Player ID should be set";
 pub const ERROR_NAME_BYTES_NOT_SET: &str = "name_bytes should be set";
 pub const ERROR_PLAYER_NOT_SET: &str = "Player should be initialized";
-const ERROR_DECK_NOT_SET: &str = "Deck should be set";
+pub const ERROR_DECK_NOT_SET: &str = "Deck should be set";
 const ERROR_CARD_MAPPING_NOT_SET: &str = "Card mapping should be set";
 const ERROR_JOINT_PK_NOT_SET: &str = "Joint public key should be set";
 const ERROR_CURRENT_DEALER_NOT_SET: &str = "Current dealer should be set";
@@ -48,26 +40,26 @@ const ERROR_RECEIVED_REVEAL_TOKENS1_NOT_SET: &str = "Received reveal tokens 1 sh
 const ERROR_RECEIVED_REVEAL_TOKENS2_NOT_SET: &str = "Received reveal tokens 2 should be set";
 const ERROR_SHUFFLE_REMASK_FAILDED: &str = "Shuffle and remask failed";
 const ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED: &str = "Deserialize reveal token failed";
+const ERROR_DESERIALIZE_PROOF_FAILED: &str = "Deserialize proof failed";
 
-
-const m: usize = 2;
-const n: usize = 26;
-const NUM_OF_CARDS: usize = m * n;
+const M: usize = 2;
+const N: usize = 26;
+const NUM_OF_CARDS: usize = M * N;
 const NUM_PLAYERS_EXPECTED: usize = 2;
 
-const debug_mode: bool = true;
+const DEBUG_MODE: bool = true;
 
 use texas_holdem::{
-    encode_cards_ext, generate_list_of_cards, generator, open_card, Bn254Fr, Card, CardParameters,
-    CardProtocol, ClassicPlayingCard, InternalPlayer, MaskedCard, ProofKeyOwnership, PublicKey,
-    RemaskingProof, RevealProof, RevealToken, Scalar, SecretKey, ZKProofShuffle,
+    encode_cards_ext, generate_list_of_cards, open_card, Bn254Fr, Card,
+    CardProtocol, InternalPlayer, MaskedCard, ProofKeyOwnership, PublicKey,
+    RemaskingProof, RevealProof, RevealToken, Scalar, ZKProofShuffle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PublicKeyInfoEncoded {
-    name: Vec<u8>,
-    public_key: Vec<u8>,
-    proof_key: Vec<u8>,
+    pub(crate) name: Vec<u8>,
+    pub(crate) public_key: Vec<u8>,
+    pub(crate) proof_key: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -103,27 +95,60 @@ pub fn handle_poker_message(
             ProtocolMessage::PublicKeyInfo(public_key_info) => {
                 handle_public_key_info_received(
                     state,
+                    peer_connection,
                     data_channel,
-                    public_key_info
+                    public_key_info,
                 );
             }
             ProtocolMessage::RevealToken(id, reveal_token1_bytes, reveal_token2_bytes) => {
                 handle_reveal_token_received(state, id, reveal_token1_bytes, reveal_token2_bytes);
             }
             ProtocolMessage::RevealTokenCommunityCards(reveal_token_bytes, index_bytes) => {
-                handle_reveal_token_community_cards_received(state, reveal_token_bytes, index_bytes);
+                handle_reveal_token_community_cards_received(
+                    state,
+                    reveal_token_bytes,
+                    index_bytes,
+                );
             }
-            ProtocolMessage::Card(data) => {
-                handle_card_received(state, data);
-            }
+
             ProtocolMessage::EncodedCards(data) => {
-                handle_encoded_cards_received(state, data);
+                if let Err(e) = handle_encoded_cards_received(state, data) {
+                    error!("Error handling encoded cards: {:?}", e);
+                }
             }
             ProtocolMessage::ShuffledAndRemaskedCards(remasked_bytes, proof_bytes) => {
-                handle_shuffled_and_remasked_cards_received(state, remasked_bytes, proof_bytes);
+                if let Err(e) =
+                    handle_shuffled_and_remasked_cards_received(state, remasked_bytes, proof_bytes)
+                {
+                    error!("Error handling shuffled and remasked cards: {:?}", e);
+                }
             }
             ProtocolMessage::RevealAllCards(reveal_all_cards_bytes) => {
-                handle_reveal_all_cards_received(state, reveal_all_cards_bytes);
+                if let Err(e) = handle_reveal_all_cards_received(state, reveal_all_cards_bytes) {
+                    error!("Error handling reveal all cards: {:?}", e);
+                }
+            }
+            ProtocolMessage::ZKProofRemoveAndRemaskChunk(i, length, chunk) => {
+                // Handle ZK proof remove and remask chunk
+                info!(
+                    "Received ZK proof remove and remask chunk: i={}, length={}",
+                    i, length
+                );
+            }
+            ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes) => {
+                // Handle ZK proof remove and remask proof
+                info!("Received ZK proof remove and remask proof");
+            }
+            ProtocolMessage::ZKProofShuffleChunk(i, length, chunk) => {
+                // Handle ZK proof shuffle chunk
+                info!(
+                    "Received ZK proof shuffle chunk: i={}, length={}",
+                    i, length
+                );
+            }
+            ProtocolMessage::ZKProofShuffleProof(proof_bytes) => {
+                // Handle ZK proof shuffle proof
+                info!("Received ZK proof shuffle proof");
             }
         }
     } else {
@@ -135,13 +160,19 @@ pub fn handle_poker_message(
 
 fn handle_public_key_info_received(
     state: Rc<RefCell<PokerState>>,
+    peer_connection: RtcPeerConnection,
     data_channel: RtcDataChannel,
     public_key_info: PublicKeyInfoEncoded,
 ) {
     let mut pk = None;
     let mut proof_key = None;
     let mut name = String::new();
-    let s = state.borrow_mut();
+    let pp = {
+        let s = state.borrow();
+        s.pp.clone()
+    };
+
+    let mut s = state.borrow_mut();
 
     match deserialize_canonical::<PublicKey>(&public_key_info.public_key) {
         Ok(decoded_pk) => pk = Some(decoded_pk),
@@ -153,7 +184,7 @@ fn handle_public_key_info_received(
         Err(e) => error!("Error deserializing proof key: {:?}", e),
     }
 
-    match String::from_utf8(&public_key_info.name.clone()) {
+    match String::from_utf8(public_key_info.name.clone()) {
         Ok(decoded_name) => name = decoded_name,
         Err(e) => error!("Error deserializing name: {:?}", e),
     }
@@ -172,17 +203,17 @@ fn handle_public_key_info_received(
 
         info!("Number of players: {:?}", s.num_players_connected);
 
-        match CardProtocol::verify_key_ownership(&pp, &pk_val, &name.as_bytes(), &proof_val) {
+        match CardProtocol::verify_key_ownership(&s.pp, &pk_val, &name.as_bytes(), &proof_val) {
             Ok(_) => {
                 // Asocia el nombre del jugador con su peer_id
                 s.players_connected.insert(
-                    peer_id,
+                    get_peer_id(peer_connection.clone()),
                     PlayerInfo {
                         peer_connection: peer_connection,
                         data_channel: data_channel,
                         name: name.clone(),
                         id: new_player_id,
-                        pk: pk_val.clone(),
+                        public_key: pk_val.clone(),
                         proof_key: proof_val.clone(),
                         cards: [None, None],
                         cards_public: [None, None],
@@ -194,20 +225,27 @@ fn handle_public_key_info_received(
         }
 
         if s.num_players_connected == NUM_PLAYERS_EXPECTED {
-            let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
-            let player_id = s.my_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET);
-
+            let current_dealer = s.current_dealer;
+            let player_id = s.my_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).clone();
+            let (player_pk, player_proof_key, player_name) = {
+                let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
+                (
+                    player.pk.clone(),
+                    player.proof_key.clone(),
+                    player.name.clone(),
+                )
+            };
             s.pk_proof_info_array
-                .push((player.pk, player.proof_key, player.name.clone()));
+                .push((player_pk, player_proof_key, player_name));
 
-            match CardProtocol::compute_aggregate_key(&s.poker_params.pp, &s.pk_proof_info_array) {
+            match CardProtocol::compute_aggregate_key(&pp, &s.pk_proof_info_array) {
                 Ok(aggregate_key) => {
                     s.joint_pk = Some(aggregate_key);
                     info!("Joint public key: {:?}", aggregate_key.to_string());
 
-                    if is_dealer(s.current_dealer, &player_id) {
+                    if is_dealer(current_dealer, &player_id) {
                         info!("All players connected, starting game");
-                        dealt_cards(state);
+                        dealt_cards(&mut *s);
                     }
                 }
                 Err(e) => error!("Error computing aggregate key: {:?}", e),
@@ -219,26 +257,18 @@ fn handle_public_key_info_received(
 fn handle_encoded_cards_received(
     state: Rc<RefCell<PokerState>>,
     encoded_cards: Vec<u8>,
-) {
-    let s = state.borrow_mut();
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut s = state.borrow_mut();
 
     info!("Got encoded cards");
     let list_of_cards = deserialize_canonical::<Vec<Card>>(&encoded_cards)?;
 
     s.card_mapping = Some(encode_cards_ext(list_of_cards.clone()));
-
+    let mut rng = StdRng::from_entropy();
     if let Some(pk) = &s.joint_pk {
         let deck_and_proofs: Vec<(MaskedCard, RemaskingProof)> = list_of_cards
             .iter()
-            .map(|card| {
-                CardProtocol::mask(
-                    s.poker_params.rng,
-                    &s.poker_params.pp,
-                    pk,
-                    &card,
-                    &Scalar::one(),
-                )
-            })
+            .map(|card| CardProtocol::mask(&mut rng, &s.pp, pk, &card, &Scalar::one()))
             .collect::<Result<Vec<_>, _>>()?;
 
         s.deck = Some(
@@ -248,33 +278,43 @@ fn handle_encoded_cards_received(
                 .collect::<Vec<MaskedCard>>(),
         );
     } else {
-        error!(ERROR_JOINT_PK_NOT_SET);
+        error!("{}", ERROR_JOINT_PK_NOT_SET);
     }
+    Ok(())
 }
 
 fn handle_shuffled_and_remasked_cards_received(
     state: Rc<RefCell<PokerState>>,
     remasked_bytes: Vec<u8>,
     proof_bytes: Vec<u8>,
-) {
-    let s = state.borrow_mut();
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Take a read-only borrow first to extract the immutable data we need,
+    // then release it before taking a mutable borrow below.
+    let (pp, pk, mut current_deck, num_players_connected) = {
+        let s_ro = state.borrow();
+        (
+            s_ro.pp.clone(),
+            s_ro.joint_pk
+                .as_ref()
+                .expect(ERROR_JOINT_PK_NOT_SET)
+                .clone(),
+            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
+            s_ro.num_players_connected,
+        )
+    };
+
+    let mut s = state.borrow_mut();
 
     info!("Got shuffled and remasked cards");
-    let remasked_cards = deserialize_canonical::<Vec<MaskedCard>>(&remasked_bytes)?;
-    let proof = deserialize_canonical::<ZKProofShuffle>(&proof_bytes)?;
+    let remasked_cards = deserialize_canonical::<Vec<MaskedCard>>(&remasked_bytes)
+        .expect("Failed to deserialize remasked cards");
+    let proof =
+        deserialize_canonical::<ZKProofShuffle>(&proof_bytes).expect("Failed to deserialize proof");
 
-    let pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
-    let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-
-    match CardProtocol::verify_shuffle(
-        &s.poker_params.pp,
-        &pk,
-        &current_deck,
-        &remasked_cards,
-        &proof,
-    ) {
+    match CardProtocol::verify_shuffle(&pp, &pk, &current_deck, &remasked_cards, &proof) {
         Ok(_) => {
             s.deck = Some(remasked_cards.clone());
+            current_deck = remasked_cards.clone();
 
             s.current_shuffler += 1;
 
@@ -282,17 +322,17 @@ fn handle_shuffled_and_remasked_cards_received(
                 .my_id
                 .as_ref()
                 .expect(ERROR_PLAYER_ID_NOT_SET)
-                .parse::<usize>()
+                .parse::<u8>()
                 .unwrap();
 
             if s.current_shuffler == my_id {
-                let shuffle_deck = shuffle_remask_and_send(state, data_channel, &remasked_cards)
+                let shuffle_deck = shuffle_remask_and_send(&mut *s, &remasked_cards)
                     .expect(ERROR_SHUFFLE_REMASK_FAILDED);
                 s.deck = Some(shuffle_deck);
             }
 
             // the player himself is not counted, only the other players
-            if s.current_shuffler == s.num_players_connected - 1 {
+            if s.current_shuffler == num_players_connected as u8 - 1 {
                 if s.is_reshuffling {
                     s.is_reshuffling = false;
                 } else {
@@ -304,83 +344,67 @@ fn handle_shuffled_and_remasked_cards_received(
                         .expect(ERROR_PLAYER_ID_NOT_SET)
                         .parse::<u8>()
                         .unwrap();
-                    if let Some(deck) = &s.deck {
-                        let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
-                        player.receive_card(s.deck[my_id as usize * 2 + 5]);
-                        player.receive_card(s.deck[my_id as usize * 2 + 1 + 5]);
-                        for i in 0..s.num_players_connected {
-                            if i == my_id as usize {
-                                continue;
+                    let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
+                    player.receive_card(current_deck[my_id as usize * 2 + 5]);
+                    player.receive_card(current_deck[my_id as usize * 2 + 1 + 5]);
+                    for i in 0..num_players_connected {
+                        if i == my_id as usize {
+                            continue;
+                        }
+
+                        let card1 = current_deck[i as usize * 2 + 5];
+                        let card2 = current_deck[i as usize * 2 + 5 + 1];
+
+                        // Find the player with the id equal to i, and assign the cards to him
+                        match find_player_by_id(&mut s.players_connected, i as u8) {
+                            Some((_, player_info)) => {
+                                let mut rng = StdRng::from_entropy();
+                                let reveal_token1: (RevealToken, RevealProof, PublicKey) =
+                                    player.compute_reveal_token(&mut rng, &pp, &card1)?;
+                                let reveal_token2: (RevealToken, RevealProof, PublicKey) =
+                                    player.compute_reveal_token(&mut rng, &pp, &card2)?;
+                                let reveal_token1_bytes = serialize_canonical(&reveal_token1)?;
+                                let reveal_token2_bytes = serialize_canonical(&reveal_token2)?;
+
+                                // Cannot clone the token, and needed to use it twice
+                                let new_token1 =
+                                    deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                                        &reveal_token1_bytes,
+                                    )?;
+                                let new_token2 =
+                                    deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                                        &reveal_token2_bytes,
+                                    )?;
+
+                                info!("Pushing reveal tokens to player {}", i);
+
+                                player_info.reveal_tokens[0].push(new_token1);
+                                player_info.reveal_tokens[1].push(new_token2);
+
+                                info!(
+                                    "send Reveal token 1 from {:?} to {:?}: {:?}",
+                                    my_id,
+                                    i,
+                                    reveal_token1.0 .0.to_string()
+                                );
+                                info!(
+                                    "send Reveal token 2 from {:?} to {:?}: {:?}",
+                                    my_id,
+                                    i,
+                                    reveal_token2.0 .0.to_string()
+                                );
+
+                                let message = ProtocolMessage::RevealToken(
+                                    i as u8,
+                                    reveal_token1_bytes,
+                                    reveal_token2_bytes,
+                                );
+                                if let Err(e) = send_protocol_message(&mut *s, message) {
+                                    error!("Error sending reveal token: {:?}", e);
+                                }
                             }
-
-                            let card1 = s.deck[i as usize * 2 + 5];
-                            let card2 = s.deck[i as usize * 2 + 5 + 1];
-
-                            // Find the player with the id equal to i, and assign the cards to him
-
-                            match find_player_by_id(&mut s.players_connected, i as u8) {
-                                Some((peer_id, player)) => {
-                                    let reveal_token1: (RevealToken, RevealProof, PublicKey) =
-                                        player.compute_reveal_token(
-                                            s.poker_params.rng,
-                                            &s.poker_params.pp,
-                                            &card1,
-                                        )?;
-                                    let reveal_token2: (RevealToken, RevealProof, PublicKey) =
-                                        player.compute_reveal_token(
-                                            s.poker_params.rng,
-                                            &s.poker_params.pp,
-                                            &card2,
-                                        )?;
-                                    let reveal_token1_bytes = serialize_canonical(&reveal_token1)?;
-                                    let reveal_token2_bytes = serialize_canonical(&reveal_token2)?;
-
-                                    // Cannot clone the token, and needed to use it twice
-                                    let new_token1 = deserialize_canonical::<(
-                                        RevealToken,
-                                        RevealProof,
-                                        PublicKey,
-                                    )>(
-                                        &reveal_token1_bytes
-                                    )?;
-                                    let new_token2 = deserialize_canonical::<(
-                                        RevealToken,
-                                        RevealProof,
-                                        PublicKey,
-                                    )>(
-                                        &reveal_token2_bytes
-                                    )?;
-
-                                    info!("Pushing reveal tokens to player {}", i);
-
-                                    player.reveal_tokens[0].push(new_token1);
-                                    player.reveal_tokens[1].push(new_token2);
-
-                                    info!(
-                                        "send Reveal token 1 from {:?} to {:?}: {:?}",
-                                        player_id,
-                                        i,
-                                        reveal_token1.0 .0.to_string()
-                                    );
-                                    info!(
-                                        "send Reveal token 2 from {:?} to {:?}: {:?}",
-                                        player_id,
-                                        i,
-                                        reveal_token2.0 .0.to_string()
-                                    );
-
-                                    let message = ProtocolMessage::RevealToken(
-                                        i as u8,
-                                        reveal_token1_bytes,
-                                        reveal_token2_bytes,
-                                    );
-                                    if let Err(e) = send_protocol_message(state, &message) {
-                                        error!("Error sending reveal token: {:?}", e);
-                                    }
-                                }
-                                None => {
-                                    error!("No se encontró al jugador con id {}", i);
-                                }
+                            None => {
+                                error!("No se encontró al jugador con id {}", i);
                             }
                         }
                     }
@@ -390,6 +414,7 @@ fn handle_shuffled_and_remasked_cards_received(
         }
         Err(e) => error!("Error verifying shuffle: {:?}", e),
     }
+    Ok(())
 }
 
 fn handle_reveal_token_received(
@@ -398,34 +423,47 @@ fn handle_reveal_token_received(
     reveal_token1_bytes: Vec<u8>,
     reveal_token2_bytes: Vec<u8>,
 ) {
-    let s = state.borrow_mut();
+    let (card_mapping, deck, num_players_connected) = {
+        let s_ro = state.borrow();
+        (
+            s_ro.card_mapping
+                .as_ref()
+                .expect(ERROR_CARD_MAPPING_NOT_SET)
+                .clone(),
+            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
+            s_ro.num_players_connected,
+        )
+    };
+    let mut s = state.borrow_mut();
 
     info!("Got reveal token");
     let reveal_token1 =
-    deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token1_bytes).expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
-    
+        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token1_bytes)
+            .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
+
     let reveal_token2 =
-        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token2_bytes).expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
+        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token2_bytes)
+            .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
 
-    let pp = s.poker_params.pp;
+    let pp = s.pp.clone();
 
-    if id != s.my_id
+    if id
+        != s.my_id
             .as_ref()
             .expect(ERROR_PLAYER_ID_NOT_SET)
             .parse::<u8>()
             .unwrap()
     {
-
         match find_player_by_id(&mut s.players_connected, id) {
-            Some((peer_id_ref, player_info)) => {
+            Some((_, player_info)) => {
                 info!("Received reveal token from player {}", id);
                 info!("Received reveal token from player {}", id);
                 player_info.reveal_tokens[0].push(reveal_token1);
                 player_info.reveal_tokens[1].push(reveal_token2);
 
                 // the player himself is not counted, only the other players
-                if player_info.reveal_tokens[0].len() == s.num_players_connected - 1 {
-                    info!("All tokens received for player {}",id);
+                if player_info.reveal_tokens[0].len() == num_players_connected - 1 {
+                    info!("All tokens received for player {}", id);
 
                     let card1 = player_info.cards[0];
                     let card2 = player_info.cards[1];
@@ -451,15 +489,13 @@ fn handle_reveal_token_received(
                 }
             }
             None => {
-                error!(
-                    "Error: Player with id not found {}", id)
+                error!("Error: Player with id not found {}", id)
             }
         }
         return;
     }
 
-
-    if (debug_mode) {
+    if DEBUG_MODE {
         info!(
             "Received reveal token 1 length: {:?}",
             s.received_reveal_tokens1.len()
@@ -469,33 +505,38 @@ fn handle_reveal_token_received(
     s.received_reveal_tokens2.push(reveal_token2);
 
     // the player himself is not counted, only the other players
-    if s.received_reveal_tokens2.len() == s.num_players_connected - 1 {
+    if s.received_reveal_tokens2.len() == num_players_connected - 1 {
         info!("All tokens received, revealing cards");
-        let player_id = s.my_id
+
+        let player_id = s
+            .my_id
             .as_ref()
             .expect(ERROR_PLAYER_ID_NOT_SET)
             .parse::<usize>()
             .unwrap();
         let index1 = player_id * 2 + 5;
         let index2 = player_id * 2 + 1 + 5;
-        let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
-        let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
 
-            
         // Peek at both cards first
-        let player = player.as_mut().expect(ERROR_PLAYER_NOT_SET);
-        let card1_result = player.peek_at_card(
-            &pp,
-            &mut s.received_reveal_tokens1,
-            &card_mapping,
-            &deck[index1 as usize],
-        );
-        let card2_result = player.peek_at_card(
-            &pp,
-            &mut s.received_reveal_tokens2,
-            &card_mapping,
-            &deck[index2 as usize],
-        );
+        let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
+
+        let card1_result = {
+            player.peek_at_card(
+                &pp,
+                &mut s.received_reveal_tokens1,
+                &card_mapping,
+                &deck[index1 as usize],
+            )
+        };
+
+        let card2_result = {
+            player.peek_at_card(
+                &pp,
+                &mut s.received_reveal_tokens2,
+                &card_mapping,
+                &deck[index2 as usize],
+            )
+        };
 
         // Check if both cards were successfully peeked
         match (card1_result, card2_result) {
@@ -506,14 +547,12 @@ fn handle_reveal_token_received(
                 let set_private_cards_clone = s.set_private_cards.clone();
 
                 let cards_array = js_sys::Array::new();
-                let card1_value = js_sys::String::from(format!("{:?}", card1));
-                let card2_value = js_sys::String::from(format!("{:?}", card2));
+                let card1_value = JsValue::from_str(&format!("{:?}", card1));
+                let card2_value = JsValue::from_str(&format!("{:?}", card2));
                 cards_array.set(0, card1_value);
                 cards_array.set(1, card2_value);
 
-                set_private_cards_clone.call2(&JsValue::NULL, cards_array);
-                
-                Ok(())
+                set_private_cards_clone.call1(&JsValue::NULL, &cards_array);
             }
             (Err(e1), Ok(_)) => error!("Error peeking at card 1: {:?}", e1),
             (Ok(_), Err(e2)) => error!("Error peeking at card 2: {:?}", e2),
@@ -526,47 +565,64 @@ fn handle_reveal_token_received(
 
 fn handle_reveal_token_community_cards_received(
     state: Rc<RefCell<PokerState>>,
-    reveal_token_bytes: Vec<u8>,
+    reveal_token_bytes: Vec<Vec<u8>>,
     index_bytes: Vec<u8>,
 ) {
+    // Take immutable snapshot of fields needed across mutable operations
+    let (pp, deck, card_mapping) = {
+        let s_ro = state.borrow();
+        (
+            s_ro.pp.clone(),
+            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
+            s_ro.card_mapping
+                .as_ref()
+                .expect(ERROR_CARD_MAPPING_NOT_SET)
+                .clone(),
+        )
+    };
 
-    let s = state.borrow_mut();
-
+    let mut s = state.borrow_mut();
 
     info!("Got reveal token community cards");
     // Deserialize each reveal token individually
-    let pp = s.poker_params.pp;
 
     for i in 0..reveal_token_bytes.len() {
         let token_bytes = &reveal_token_bytes[i];
         let index = index_bytes[i] as usize;
 
-        let token = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&token_bytes).expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
+        let token =
+            deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(token_bytes.as_slice())
+                .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
         s.community_cards_tokens[index].push(token);
 
         // the player himself is not counted, only the other players
         if s.community_cards_tokens[index].len() == s.num_players_connected - 1 {
             info!("All tokens received, revealing cards");
-            
-            let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
-            let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-            
+
             let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
-            
-            match player.compute_reveal_token(s.poker_params.rng, &pp, &deck[index]) {
+
+            let mut rng = StdRng::from_entropy();
+            match player.compute_reveal_token(&mut rng, &pp, &deck[index]) {
                 Ok(token) => {
                     s.community_cards_tokens[index].push(token);
-                    match open_card(&pp, &s.community_cards_tokens[index], &card_mapping, &deck[index]) {
-                        
+                    match open_card(
+                        &pp,
+                        &s.community_cards_tokens[index],
+                        &card_mapping,
+                        &deck[index],
+                    ) {
                         Ok(card) => {
                             info!("Community Card{:?}: {:?}", index, card);
 
                             let set_community_card_clone = s.set_community_card.clone();
 
-                            let index_value = js_sys::String::from(format!("{:?}", index));
-                            let card_value = js_sys::String::from(format!("{:?}", card));
-                            set_community_card_clone.call2(&JsValue::NULL, index_value, card_value);
-                        
+                            let index_value = JsValue::from_str(&format!("{:?}", index));
+                            let card_value = JsValue::from_str(&format!("{:?}", card));
+                            set_community_card_clone.call2(
+                                &JsValue::NULL,
+                                &index_value,
+                                &card_value,
+                            );
                         }
                         Err(e) => error!("Error opening card: {:?}", e),
                     }
@@ -579,25 +635,34 @@ fn handle_reveal_token_community_cards_received(
 
 fn handle_reveal_all_cards_received(
     state: Rc<RefCell<PokerState>>,
-    reveal_all_cards_bytes: Vec<u8>,
-) {
-    
-    let s = state.borrow_mut();
+    reveal_all_cards_bytes: Vec<Vec<u8>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (pp, deck, card_mapping) = {
+        let s = state.borrow();
+        (
+            s.pp.clone(),
+            s.deck.clone().expect(ERROR_DECK_NOT_SET),
+            s.card_mapping.clone().expect(ERROR_CARD_MAPPING_NOT_SET),
+        )
+    };
+
+    let mut s = state.borrow_mut();
 
     info!("Got reveal all cards");
 
-    let pp = s.poker_params.pp;
-    let rng = &mut s.poker_params.rng;
+    let mut rng = StdRng::from_entropy();
     let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
-    let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-    let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
     for i in 0..reveal_all_cards_bytes.len() {
-        let reveal_token = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_all_cards_bytes[i]).expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
-        let player_token = player.compute_reveal_token(rng, &pp, &deck[i as usize])?;
+        let reveal_token = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+            &reveal_all_cards_bytes[i],
+        )
+        .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
+        let player_token = player.compute_reveal_token(&mut rng, &pp, &deck[i as usize])?;
         let tokens = vec![reveal_token, player_token];
         let card = open_card(&pp, &tokens, &card_mapping, &deck[i as usize])?;
     }
+    Ok(())
 }
 
 fn handle_zk_proof_remove_and_remask_chunk_received(
@@ -606,23 +671,19 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
     length: u8,
     chunk: Vec<u8>,
 ) {
-    let s = state.borrow_mut();
+    let mut s = state.borrow_mut();
 
     info!("Got zk proof remove and remask chunk");
     s.public_reshuffle_bytes.push((i, chunk));
 
-    if s.public_reshuffle_bytes.len() - 1 == length{
+    if s.public_reshuffle_bytes.len() - 1 == length as usize {
         info!("All public reshuffle bytes received");
         s.is_all_public_reshuffle_bytes_received = true;
-        
+
         if s.proof_reshuffle_bytes.len() > 0 {
             info!("There are more than one proof reshuffle");
-        }
-        else if s.proof_reshuffle_bytes.len() == 1 {
-
-            match process_reshuffle_verification(
-                state,
-            ){
+        } else if s.proof_reshuffle_bytes.len() == 1 {
+            match process_reshuffle_verification(&mut *s) {
                 Ok((reshuffled_deck, new_reshuffler)) => {
                     s.deck = Some(reshuffled_deck);
                     s.current_reshuffler = new_reshuffler;
@@ -631,26 +692,22 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
                     error!("Error en proceso de verificación de reshuffle: {:?}", e);
                 }
             }
-        }
-        else{
+        } else {
             error!("There are no proof reshuffle bytes");
         }
     }
 }
 
-
 fn handle_zk_proof_remove_and_remask_proof_received(
     state: Rc<RefCell<PokerState>>,
     proof_bytes: Vec<u8>,
 ) {
-    let s = state.borrow_mut();
+    let mut s = state.borrow_mut();
 
     s.proof_reshuffle_bytes = proof_bytes;
 
-    if is_all_public_reshuffle_bytes_received {
-        match process_reshuffle_verification(
-            state,
-        ) {
+    if s.is_all_public_reshuffle_bytes_received {
+        match process_reshuffle_verification(&mut *s) {
             Ok((reshuffled_deck, new_reshuffler)) => {
                 s.deck = Some(reshuffled_deck);
                 s.current_reshuffler = new_reshuffler;
@@ -662,30 +719,25 @@ fn handle_zk_proof_remove_and_remask_proof_received(
     } else {
         error!("No all public reshuffle bytes");
     }
-
 }
-
 
 fn handle_zk_proof_shuffle_chunk_received(
     state: Rc<RefCell<PokerState>>,
-    data_channel: RtcDataChannel,
     i: u8,
     length: u8,
     chunk: Vec<u8>,
 ) {
-    let s = state.borrow_mut();
+    let mut s = state.borrow_mut();
     s.public_shuffle_bytes.push((i, chunk.clone()));
 
-    if s.public_shuffle_bytes.len() - 1 == length {
+    if s.public_shuffle_bytes.len() - 1 == length as usize {
         s.is_all_public_shuffle_bytes_received = true;
         if s.proof_shuffle_bytes.is_empty() {
             error!("No shuffle proof bytes yet");
         } else {
             if validate_chunks(&s.public_shuffle_bytes, length) {
                 // Call process_shuffle_verification here
-                match process_shuffle_verification(
-                    state,
-                ) {
+                match process_shuffle_verification(&mut *s) {
                     Ok(_) => {
                         info!("Shuffle verification completed");
                     }
@@ -696,50 +748,50 @@ fn handle_zk_proof_shuffle_chunk_received(
             }
         }
     }
-
-
 }
-
 
 // -----------------------------HELPER FUNCTIONS-----------------------------
 
-pub fn send_protocol_message(
-    state: Rc<RefCell<PokerState>>,
-    message: ProtocolMessage,
-) -> Result<(), JsValue> {
-    let s = state.borrow();
-
+pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Result<(), JsValue> {
     // Serialize the message
     let serialized_message = serde_json_wasm::to_string(&message)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {:?}", e)))?;
 
     let mut errors = Vec::new();
-    
+
     // Send to all connected players
-    let s = state.borrow();
-    for (peer_connection, player_info) in &s.players_connected {
+    for (_, player_info) in &s.players_connected {
         if player_info.data_channel.ready_state() == web_sys::RtcDataChannelState::Open {
             if let Err(e) = player_info.data_channel.send_with_str(&serialized_message) {
-                errors.push(format!("Error sending to player {}: {:?}", player_info.id, e));
+                errors.push(format!(
+                    "Error sending to player {}: {:?}",
+                    player_info.id, e
+                ));
             } else {
                 info!("Message sent successfully to player {}", player_info.id);
             }
         } else {
-            errors.push(format!("DataChannel not open for player {}", player_info.id));
+            errors.push(format!(
+                "DataChannel not open for player {}",
+                player_info.id
+            ));
         }
     }
-    
+
     if !errors.is_empty() {
-        return Err(JsValue::from_str(&format!("Broadcast errors: {:?}", errors)));
+        return Err(JsValue::from_str(&format!(
+            "Broadcast errors: {:?}",
+            errors
+        )));
     }
     info!("ProtocolMessage sent successfully: {:?}", message);
     Ok(())
 }
 
 fn find_player_by_id(
-    players_connected: &mut HashMap<RtcPeerConnection, PlayerInfo>,
+    players_connected: &mut HashMap<String, PlayerInfo>,
     id: u8,
-) -> Option<(&RtcPeerConnection, &mut PlayerInfo)> {
+) -> Option<(&String, &mut PlayerInfo)> {
     players_connected
         .iter_mut()
         .find(|(_, player_info)| player_info.id == id)
@@ -765,7 +817,6 @@ fn validate_chunks(chunks: &[(u8, Vec<u8>)], expected_length: u8) -> bool {
 fn is_dealer(current_dealer: u8, player_id: &String) -> bool {
     current_dealer == player_id.parse::<u8>().unwrap()
 }
-
 
 pub fn deserialize_canonical<T: CanonicalDeserialize>(bytes: &[u8]) -> Result<T, Box<dyn Error>> {
     let mut reader = &bytes[..];
@@ -794,30 +845,47 @@ fn deserialize_chunks(chunks: &[(u8, Vec<u8>)]) -> Result<Vec<String>, Box<dyn E
     result
 }
 
+fn deserializar_chunks_a_strings(
+    bytes_chunks: Vec<Vec<u8>>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut resultado = Vec::new();
 
-fn dealt_cards(
-    state: Rc<RefCell<PokerState>>,
-) -> Result<(), Box<dyn Error>> {
-    let s = state.borrow_mut();
+    for chunk_bytes in bytes_chunks {
+        // Deserializar cada fragmento de bytes a un Vec<String>
+        let chunk: Vec<String> = serde_json::from_slice(&chunk_bytes)?;
+        resultado.extend(chunk);
+    }
 
+    Ok(resultado)
+}
+
+fn get_peer_id(peer_connection: RtcPeerConnection) -> String {
+    let mut hasher = DefaultHasher::new();
+    // Use the object's memory address or some unique property
+    std::ptr::addr_of!(peer_connection).hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("peer_{}", hash)
+}
+
+fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
     info!("The player is the dealer.");
 
-    let rng = &mut s.poker_params.rng;
-    let list_of_cards = generate_list_of_cards(rng, NUM_OF_CARDS);
+    let mut rng = StdRng::from_entropy();
+    let list_of_cards = generate_list_of_cards(&mut rng, NUM_OF_CARDS);
     let card_mapping = encode_cards_ext(list_of_cards.clone());
 
     let card_mapping_bytes = serialize_canonical(&list_of_cards)?;
-    if let Err(e) = send_protocol_message(
-        state,
-        &ProtocolMessage::EncodedCards(card_mapping_bytes),
-    ) {
+    if let Err(e) =
+        send_protocol_message(&mut *s, ProtocolMessage::EncodedCards(card_mapping_bytes))
+    {
         error!("Error sending encoded cards: {:?}", e);
     }
     let joint_pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
+    let pp = s.pp.clone();
 
     let deck_and_proofs: Vec<(MaskedCard, RemaskingProof)> = list_of_cards
         .iter()
-        .map(|card| CardProtocol::mask(rng, &s.poker_params.pp, &joint_pk, &card, &Scalar::one()))
+        .map(|card| CardProtocol::mask(&mut rng, &pp, &joint_pk, &card, &Scalar::one()))
         .collect::<Result<Vec<_>, _>>()?;
 
     let deck = deck_and_proofs
@@ -825,15 +893,14 @@ fn dealt_cards(
         .map(|x| x.0)
         .collect::<Vec<MaskedCard>>();
 
-    if debug_mode {
+    if DEBUG_MODE {
         info!("Initial deck:");
-        for card in deck.as_ref().expect(ERROR_DECK_NOT_SET).iter() {
-            info!("{:?}", card.0.to_string());
-        }
+        // for card in deck.as_ref().expect(ERROR_DECK_NOT_SET).iter() {
+        //     info!("{:?}", card.0.to_string());
+        // }
     }
 
-    let shuffled_deck =
-        shuffle_remask_and_send(state, &deck).expect(ERROR_SHUFFLE_REMASK_FAILDED);
+    let shuffled_deck = shuffle_remask_and_send(s, &deck).expect(ERROR_SHUFFLE_REMASK_FAILDED);
 
     s.deck = Some(shuffled_deck.clone());
     s.card_mapping = Some(card_mapping);
@@ -843,28 +910,16 @@ fn dealt_cards(
 
 #[allow(non_snake_case)]
 fn shuffle_remask_and_send(
-    state: Rc<RefCell<PokerState>>,
+    s: &mut PokerState,
     new_deck: &Vec<MaskedCard>,
 ) -> Result<Vec<MaskedCard>, Box<dyn Error>> {
-    let s = state.borrow_mut();
-
-    let rng = &mut s.poker_params.rng;
-    if debug_mode {
+    let mut rng = StdRng::from_entropy();
+    if DEBUG_MODE {
         info!("=== DEBUG: Starting shuffle_remask_and_send ===");
-        info!(
-            "DEBUG: Input parameters - m: {}, n: {}, deck_size: {}",
-            m,
-            n,
-            s.new_deck.as_ref().unwrap().len()
-        );
-        info!(
-            "DEBUG: verifyShuffling available: {}",
-            s.verify_shuffling.is_some()
-        );
         info!("send shuffled and remasked cards");
     }
 
-    let permutation = Permutation::new(rng, m * n);
+    let permutation = Permutation::new(&mut rng, M * N);
 
     let mut rng_r_prime = StdRng::from_entropy();
 
@@ -872,7 +927,7 @@ fn shuffle_remask_and_send(
     let exponent: u32 = 100;
     let max_value: u128 = base.pow(exponent);
 
-    if debug_mode {
+    if DEBUG_MODE {
         info!(
             "DEBUG: Generating r_prime values with max_value: {}",
             max_value
@@ -886,20 +941,20 @@ fn shuffle_remask_and_send(
         r_prime.push(r);
     }
 
-    if debug_mode {
+    if DEBUG_MODE {
         info!("DEBUG: Generated {} r_prime values", r_prime.len());
     }
 
     match CardProtocol::shuffle_and_remask2(
-        &s.provers.prover_shuffle,
+        &mut s.provers.prover_shuffle,
         &permutation,
         &mut r_prime,
-        &s.poker_params.pp,
+        &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         &s.new_deck.as_ref().expect(ERROR_DECK_NOT_SET).to_vec(),
     ) {
         Ok((public, proof)) => {
-            if debug_mode {
+            if DEBUG_MODE {
                 info!(
                     "DEBUG: shuffleAndRemask2 succeeded, public size: {}",
                     public.len()
@@ -907,7 +962,7 @@ fn shuffle_remask_and_send(
             }
             let chunk_size = 50; // Ajusta este valor según sea necesario
             let serializable_public: Vec<String> = public.iter().map(|fr| fr.to_string()).collect();
-            if debug_mode {
+            if DEBUG_MODE {
                 info!(
                     "DEBUG: Serialized public to {} strings",
                     serializable_public.len()
@@ -916,7 +971,7 @@ fn shuffle_remask_and_send(
 
             let chunks = serializable_public.chunks(chunk_size).collect::<Vec<_>>();
             let length = chunks.len();
-            if debug_mode {
+            if DEBUG_MODE {
                 info!("DEBUG: Split into {} chunks of size {}", length, chunk_size);
             }
 
@@ -924,7 +979,7 @@ fn shuffle_remask_and_send(
                 .iter()
                 .map(|chunk| serde_json::to_vec(chunk).unwrap_or_default())
                 .collect();
-            if debug_mode {
+            if DEBUG_MODE {
                 info!(
                     "DEBUG: Serialized chunks to bytes, total size: {} bytes",
                     serialized_chunks
@@ -934,13 +989,13 @@ fn shuffle_remask_and_send(
                 );
             }
 
-            let public_strings = deserializar_chunks_a_strings(serialized_chunks.clone())?;
-            if debug_mode {
+            // let public_strings = deserializar_chunks_a_strings(serialized_chunks.clone())?;
+            if DEBUG_MODE {
                 info!("DEBUG: Deserialized chunks back to strings successfully");
             }
 
             for (i, chunk) in serialized_chunks.iter().enumerate() {
-                if debug_mode {
+                if DEBUG_MODE {
                     info!(
                         "DEBUG: Sending chunk {}/{} ({} bytes)",
                         i + 1,
@@ -949,54 +1004,53 @@ fn shuffle_remask_and_send(
                     );
                 }
                 if let Err(e) = send_protocol_message(
-                    state,
-                    &ProtocolMessage::ZKProofShuffleChunk(i as u8, length as u8, chunk.clone()),
+                    s,
+                    ProtocolMessage::ZKProofShuffleChunk(i as u8, length as u8, chunk.clone()),
                 ) {
-                    if debug_mode {
+                    if DEBUG_MODE {
                         error!("Error sending zk proof chunk {}: {:?}", i, e);
                     }
-                    return Err(e.into());
+                    return Err(format!("{:?}", e).into());
                 }
-                if debug_mode {
+                if DEBUG_MODE {
                     info!("DEBUG: Successfully sent chunk {}/{}", i + 1, length);
                 }
             }
 
             // Enviar la prueba por separado
-            if debug_mode {
+            if DEBUG_MODE {
                 info!("DEBUG: Serializing proof...");
             }
             let proof_bytes = serialize_proof(&proof)?;
-            if debug_mode {
+            if DEBUG_MODE {
                 info!("DEBUG: Proof serialized to {} bytes", proof_bytes.len());
             }
 
-            if let Err(e) = send_protocol_message(
-                state,
-                &ProtocolMessage::ZKProofShuffleProof(proof_bytes),
-            ) {
-                if debug_mode {
+            if let Err(e) =
+                send_protocol_message(s, ProtocolMessage::ZKProofShuffleProof(proof_bytes))
+            {
+                if DEBUG_MODE {
                     error!("Error sending zk proof: {:?}", e);
                 }
-                return Err(e.into());
+                return Err(format!("{:?}", e).into());
             }
-            if debug_mode {
+            if DEBUG_MODE {
                 info!("DEBUG: Successfully sent proof");
             }
 
-            if debug_mode {
+            if DEBUG_MODE {
                 info!("DEBUG: Verifying shuffle and remask...");
             }
             match CardProtocol::verify_shuffle_remask2(
-                &s.provers.prover_shuffle,
-                &s.poker_params.pp,
+                &mut s.provers.prover_shuffle,
+                &s.pp,
                 &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
                 &new_deck.to_vec(),
                 public.clone(),
                 proof.clone(),
             ) {
                 Ok(shuffled_deck) => {
-                    if debug_mode {
+                    if DEBUG_MODE {
                         info!(
                             "DEBUG: Verification succeeded, shuffled deck size: {}",
                             shuffled_deck.len()
@@ -1004,41 +1058,37 @@ fn shuffle_remask_and_send(
                     }
 
                     // Call the JavaScript callback to verify shuffling if available
-                    if let (Some(verify_shuffling)) = (s.verify_shuffling) {
-                        if debug_mode {
-                            info!("DEBUG: Calling JavaScript verify_shuffling callback...");
-                        }
 
-                        let verify_shuffling_clone = verify_shuffling.clone();
-
-                        let public_clone = public.clone();
-                        let proof_clone = proof.clone();
-
-                        let a = (proof_clone.a.x, proof_clone.a.y);
-                        let b = (
-                            proof_clone.b.x.c0,
-                            proof_clone.b.x.c1,
-                            proof_clone.b.y.c0,
-                            proof_clone.b.y.c1,
-                        );
-
-                        // let b = (proof_clone.b.x.c0, proof_clone.b.y.c0, proof_clone.b.x.c1, proof_clone.b.y.c1);
-                        let c = (proof_clone.c.x, proof_clone.c.y);
-
-                        let public_str = JsValue::from_str(format!("{:?}", public_clone));
-                        let proof_str = JsValue::from_str(format!("{:?}", (a, b, c)));
-
-                        verify_shuffling_clone.call2(&JsValue::NULL, public_str, proof_str);
-                        Ok(());
-
-                        if debug_mode {
-                            info!("DEBUG: JavaScript callback sent successfully");
-                        }
-                    } else {
-                        error!("DEBUG: No JavaScript callback available");
+                    if DEBUG_MODE {
+                        info!("DEBUG: Calling JavaScript verify_shuffling callback...");
                     }
 
-                    if debug_mode {
+                    let verify_shuffling_clone = s.verify_shuffling.clone();
+
+                    let public_clone = public.clone();
+                    let proof_clone = proof.clone();
+
+                    let a = (proof_clone.a.x, proof_clone.a.y);
+                    let b = (
+                        proof_clone.b.x.c0,
+                        proof_clone.b.x.c1,
+                        proof_clone.b.y.c0,
+                        proof_clone.b.y.c1,
+                    );
+
+                    // let b = (proof_clone.b.x.c0, proof_clone.b.y.c0, proof_clone.b.x.c1, proof_clone.b.y.c1);
+                    let c = (proof_clone.c.x, proof_clone.c.y);
+
+                    let public_str = JsValue::from_str(&format!("{:?}", public_clone));
+                    let proof_str = JsValue::from_str(&format!("{:?}", (a, b, c)));
+
+                    verify_shuffling_clone.call2(&JsValue::NULL, &public_str, &proof_str);
+
+                    if DEBUG_MODE {
+                        info!("DEBUG: JavaScript callback sent successfully");
+                    }
+
+                    if DEBUG_MODE {
                         info!("DEBUG: shuffle_remask_and_send completed successfully");
                     }
                     Ok(shuffled_deck)
@@ -1057,45 +1107,45 @@ fn shuffle_remask_and_send(
 }
 
 fn process_reshuffle_verification(
-    state: Rc<RefCell<PokerState>>,
+    s: &mut PokerState,
 ) -> Result<(Vec<MaskedCard>, u8), Box<dyn Error>> {
-
-    let s = state.borrow_mut();
     let current_reshuffler = s.current_reshuffler;
 
-    match find_player_by_id(s.players_connected, current_reshuffler) {
+    let (pp, num_players_connected) = {
+        let s_ro = &*s; // use immutable borrow; was: &mut s
+        (s_ro.pp.clone(), s_ro.num_players_connected)
+    };
+
+    match find_player_by_id(&mut s.players_connected, current_reshuffler) {
         Some((_, player_info)) => {
-            let player_cards: Vec<MaskedCard> = player_info
-                .cards_public
-                .iter()
-                .filter_map(|card| card.clone())
-                .collect();
+            let (player_cards, player_pk) = {
+                let cards: Vec<MaskedCard> = player_info
+                    .cards_public
+                    .iter()
+                    .filter_map(|card| card.clone())
+                    .collect();
+                (cards, player_info.public_key.clone())
+            };
 
-
-            match verify_remask_for_reshuffle(
-                state,
-                player_cards,
-                &player_info.pk
-            ) {
+            match verify_remask_for_reshuffle(s, player_cards, &player_pk) {
                 Ok(reshuffled_deck) => {
                     let new_reshuffler = s.current_reshuffler + 1;
-                    let player_id = s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET);
-                    let pp = s.poker_params.pp;
-                    if is_dealer(new_reshuffler, player_id) {
-                        let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
+                    let player_id = s
+                        .my_player_id
+                        .as_ref()
+                        .expect(ERROR_PLAYER_ID_NOT_SET)
+                        .clone();
+                    if is_dealer(new_reshuffler, &player_id) {
+                        let card_mapping =
+                            s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
                         let m_list = card_mapping.keys().cloned().collect::<Vec<Card>>();
-                        
-                        let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
-                        match send_remask_for_reshuffle(
-                            state,
-                            &reshuffled_deck,
-                            player,
-                            &m_list,
-                        ) {
+
+                        let player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
+                        match send_remask_for_reshuffle(s, &reshuffled_deck, &player, &m_list) {
                             Ok((public, proof)) => {
                                 let final_deck = CardProtocol::verify_reshuffle_remask(
-                                    s.provers.prover_reshuffle,
+                                    &mut s.provers.prover_reshuffle,
                                     &pp,
                                     &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
                                     &reshuffled_deck,
@@ -1110,26 +1160,27 @@ fn process_reshuffle_verification(
                                     proof,
                                 )?;
 
-                                if new_reshuffler == s.num_players_connected {
+                                if new_reshuffler == num_players_connected as u8 {
                                     info!("All reshuffled");
 
-                                    if is_dealer(s.current_dealer, player_id) {
+                                    if is_dealer(s.current_dealer, &player_id) {
                                         info!("Starting shuffling and remasking");
-                                        let shuffled_deck = shuffle_remask_and_send(
-                                            state, final_deck
-                                        )?;
+                                        let shuffled_deck =
+                                            shuffle_remask_and_send(&mut *s, &final_deck)?;
                                         return Ok((shuffled_deck, new_reshuffler));
                                     }
                                 }
 
-                                Ok((final_deck, new_reshuffler));
+                                return Ok((final_deck, new_reshuffler));
                             }
                             Err(e) => {
                                 error!("Error sending remask for reshuffle: {:?}", e);
-                                Err(e.into());
+                                return Err(format!("{:?}", e).into());
                             }
                         }
-                    } 
+                    } else {
+                        return Ok((reshuffled_deck, new_reshuffler));
+                    }
                 }
                 Err(e) => {
                     error!("Error verifying reshuffle remask: {:?}", e);
@@ -1145,13 +1196,9 @@ fn process_reshuffle_verification(
     }
 }
 
-
 #[allow(non_snake_case)]
-fn process_shuffle_verification(
-    state: Rc<RefCell<PokerState>>,
-) -> Result<(), Box<dyn Error>> {
-    let s = state.borrow_mut();
-    let public_strings = deserialize_chunks(s.public_shuffle_bytes)?;
+fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
+    let public_strings = deserialize_chunks(&s.public_shuffle_bytes)?;
     let public_fr: Vec<Bn254Fr> = public_strings
         .iter()
         .map(|s_i| {
@@ -1166,34 +1213,40 @@ fn process_shuffle_verification(
         })
         .collect();
 
-    let proof = deserialize_proof(s.proof_shuffle_bytes)?;
-    let pp = s.poker_params.pp;
+    let proof = deserialize_proof(&s.proof_shuffle_bytes)?;
+    let pp = s.pp.clone();
     let joint_pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
-    let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-    let id = s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<u8>().unwrap();
-    let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
-    let rng = s.rng.as_mut();
+    let mut deck = s.deck.take().expect(ERROR_DECK_NOT_SET);
+
+    let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
+    let mut rng = StdRng::from_entropy();
 
     match CardProtocol::verify_shuffle_remask2(
-        s.provers.prover_shuffle,
-        pp,
+        &mut s.provers.prover_shuffle,
+        &pp,
         joint_pk,
-        deck,
+        &deck,
         public_fr,
         proof,
     ) {
         Ok(shuffled_deck) => {
             s.deck = Some(shuffled_deck.clone());
+            let shuffled_deck_clone = shuffled_deck.clone();
+            deck = shuffled_deck_clone;
             s.current_shuffler += 1;
 
-            if s.current_shuffler == s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<usize>().unwrap() {
+            if s.current_shuffler
+                == s.my_player_id
+                    .as_ref()
+                    .expect(ERROR_PLAYER_ID_NOT_SET)
+                    .parse::<u8>()
+                    .unwrap()
+            {
                 // Call shuffle_remask_and_send as before
-                match shuffle_remask_and_send(
-                    state,
-                    &shuffled_deck,
-                ) {
+                match shuffle_remask_and_send(s, &shuffled_deck) {
                     Ok(new_deck) => {
-                        s.deck = Some(new_deck);
+                        s.deck = Some(new_deck.clone());
+                        deck = new_deck.clone();
                     }
                     Err(e) => {
                         error!("Error in shuffle verification: {:?}", e);
@@ -1201,14 +1254,16 @@ fn process_shuffle_verification(
                 }
             }
 
-            if s.current_shuffler == s.num_players_connected - 1 {
+            if s.current_shuffler == s.num_players_connected as u8 - 1 {
                 s.current_shuffler = 0;
                 info!("All players shuffled, revealing cards");
-                let id = s.my_player_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<u8>().unwrap();
-                
-                let deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-                
-        
+                let id = s
+                    .my_player_id
+                    .as_ref()
+                    .expect(ERROR_PLAYER_ID_NOT_SET)
+                    .parse::<u8>()
+                    .unwrap();
+
                 player.receive_card(deck[id as usize * 2 + 5]);
                 player.receive_card(deck[id as usize * 2 + 1 + 5]);
 
@@ -1220,9 +1275,9 @@ fn process_shuffle_verification(
                     let card2 = deck[i * 2 + 5 + 1];
 
                     let reveal_token1: (RevealToken, RevealProof, PublicKey) =
-                        player.compute_reveal_token(rng, pp, &card1)?;
+                        player.compute_reveal_token(&mut rng, &pp, &card1)?;
                     let reveal_token2: (RevealToken, RevealProof, PublicKey) =
-                        player.compute_reveal_token(rng, pp, &card2)?;
+                        player.compute_reveal_token(&mut rng, &pp, &card2)?;
                     let reveal_token1_bytes = serialize_canonical(&reveal_token1)?;
                     let reveal_token2_bytes = serialize_canonical(&reveal_token2)?;
 
@@ -1233,7 +1288,6 @@ fn process_shuffle_verification(
                     let generator_string = pp.enc_parameters.generator.to_string();
 
                     let player_pk_string = player.pk.to_string();
-                    let verify_reveal_token_clone = verifyRevealToken.clone();
 
                     let token1 = reveal_token1.0;
                     let token2 = reveal_token2.0;
@@ -1241,28 +1295,28 @@ fn process_shuffle_verification(
                     let proof1 = reveal_token1.1;
                     let proof2 = reveal_token2.1;
 
-                    let G_card1 = JsValue::from_str(format!("{:?}", card1_string));
-                    let G_card2 = JsValue::from_str(format!("{:?}", card2_string));
+                    let G_card1 = JsValue::from_str(&format!("{:?}", card1_string));
+                    let G_card2 = JsValue::from_str(&format!("{:?}", card2_string));
 
-                    let H = JsValue::from_str(format!("{:?}", generator_string));
+                    let H = JsValue::from_str(&format!("{:?}", generator_string));
 
                     let statement1_card1 =
-                        JsValue::from_str(format!("{:?}", token1.0.to_string()));
+                        JsValue::from_str(&format!("{:?}", token1.0.to_string()));
                     let statement1_card2 =
-                        JsValue::from_str(format!("{:?}", token2.0.to_string()));
+                        JsValue::from_str(&format!("{:?}", token2.0.to_string()));
 
-                    let statement2 = JsValue::from_str(format!("{:?}", player_pk_string));
+                    let statement2 = JsValue::from_str(&format!("{:?}", player_pk_string));
 
-                    let A_card1 = JsValue::from_str(format!("{:?}", proof1.a.to_string()));
-                    let B_card1 = JsValue::from_str(format!("{:?}", proof1.b.to_string()));
-                    let r_card1 = JsValue::from_str(format!("{:?}", proof1.r.to_string()));
+                    let A_card1 = JsValue::from_str(&format!("{:?}", proof1.a.to_string()));
+                    let B_card1 = JsValue::from_str(&format!("{:?}", proof1.b.to_string()));
+                    let r_card1 = JsValue::from_str(&format!("{:?}", proof1.r.to_string()));
 
-                    let A_card2 = JsValue::from_str(format!("{:?}", proof2.a.to_string()));
-                    let B_card2 = JsValue::from_str(format!("{:?}", proof2.b.to_string()));
-                    let r_card2 = JsValue::from_str(format!("{:?}", proof2.r.to_string()));
-                    let receiver_chair = JsValue::from_str(format!("{:?}", i));
-                    
-                    verify_shuffling_clone.call2(&JsValue::NULL,
+                    let A_card2 = JsValue::from_str(&format!("{:?}", proof2.a.to_string()));
+                    let B_card2 = JsValue::from_str(&format!("{:?}", proof2.b.to_string()));
+                    let r_card2 = JsValue::from_str(&format!("{:?}", proof2.r.to_string()));
+                    let receiver_chair = JsValue::from_str(&format!("{:?}", i));
+
+                    let args = vec![
                         G_card1,
                         G_card2,
                         H,
@@ -1275,20 +1329,24 @@ fn process_shuffle_verification(
                         B_card2,
                         r_card1,
                         r_card2,
-                    );
-                
-                    let new_token1 =
-                        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
-                            &reveal_token1_bytes,
-                        )?;
-                    let new_token2 =
-                        deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
-                            &reveal_token2_bytes,
-                        )?;
+                    ];
+
+                    let args_array = js_sys::Array::new();
+                    for arg in args {
+                        args_array.push(&arg);
+                    }
+                    verify_reveal_token_clone.apply(&JsValue::NULL, &args_array);
+
+                    let new_token1 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                        &reveal_token1_bytes,
+                    )?;
+                    let new_token2 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                        &reveal_token2_bytes,
+                    )?;
 
                     info!("Pushing reveal tokens to player {}", i);
 
-                    match find_player_by_id(s.players_connected, i as u8) {
+                    match find_player_by_id(&mut s.players_connected, i as u8) {
                         Some((peer_id, player_info)) => {
                             player_info.cards = [Some(card1), Some(card2)];
                             player_info.reveal_tokens[0].push(new_token1);
@@ -1298,28 +1356,30 @@ fn process_shuffle_verification(
                             error!("Player with id {} not found", i);
                         }
                     }
-                    
-                    if debug_mode {
+
+                    if DEBUG_MODE {
                         info!(
                             "send Reveal token 1 from {:?} to {:?}: {:?}",
-                            player_id,
+                            id,
                             i,
                             reveal_token1.0 .0.to_string()
                         );
                         info!(
                             "send Reveal token 2 from {:?} to {:?}: {:?}",
-                            player_id,
+                            id,
                             i,
                             reveal_token2.0 .0.to_string()
                         );
                     }
 
+                    let reveal_token1_bytes_clone = reveal_token1_bytes.clone();
+                    let reveal_token2_bytes_clone = reveal_token2_bytes.clone();
                     let message = ProtocolMessage::RevealToken(
                         i as u8,
-                        reveal_token1_bytes,
-                        reveal_token2_bytes,
+                        reveal_token1_bytes_clone,
+                        reveal_token2_bytes_clone,
                     );
-                    if let Err(e) = send_protocol_message(state, &message) {
+                    if let Err(e) = send_protocol_message(s, message) {
                         error!("Error sending reveal token: {:?}", e);
                     }
                 }
@@ -1334,15 +1394,12 @@ fn process_shuffle_verification(
     }
 }
 
-
 pub fn verify_remask_for_reshuffle(
-    state: Rc<RefCell<PokerState>>,
+    s: &mut PokerState,
     player_cards: Vec<MaskedCard>,
     player_pk: &PublicKey,
-
 ) -> Result<Vec<MaskedCard>, Box<dyn Error>> {
-
-    let public_strings = deserialize_chunks(s.public_reshuffle_bytes)?;
+    let public_strings = deserialize_chunks(&s.public_reshuffle_bytes)?;
     info!("verify_remask_for_reshuffle");
 
     let public_cards_1 = player_cards[0].clone();
@@ -1370,11 +1427,11 @@ pub fn verify_remask_for_reshuffle(
         .collect();
 
     match CardProtocol::verify_reshuffle_remask(
-        s.provers.prover_reshuffle,
-        &s.poker_params.pp,
+        &mut s.provers.prover_reshuffle,
+        &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         &s.deck.as_ref().expect(ERROR_DECK_NOT_SET),
-        player_cards,
+        &player_cards,
         player_pk,
         &m_list,
         public_fr,
@@ -1383,19 +1440,18 @@ pub fn verify_remask_for_reshuffle(
         Ok(reshuffled_deck) => Ok(reshuffled_deck),
         Err(e) => {
             error!("Error verifying reshuffle remask: {:?}", e);
+            Err(Box::new(e))
         }
     }
 }
 
 fn send_remask_for_reshuffle(
-    state: Rc<RefCell<PokerState>>,
+    s: &mut PokerState,
     new_deck: &Vec<MaskedCard>,
     player: &InternalPlayer,
     m_list: &Vec<Card>,
 ) -> Result<(Vec<Bn254Fr>, ZKProofCardRemoval), Box<dyn Error>> {
-    
-    let s = state.borrow_mut();
-    let mut rng = StdRng::from_entropy(); 
+    let mut rng = StdRng::from_entropy();
 
     let base: u128 = 2;
     let exponent: u32 = 100;
@@ -1409,9 +1465,9 @@ fn send_remask_for_reshuffle(
     }
 
     match CardProtocol::remask_for_reshuffle(
-        s.provers.prover_reshuffle,
+        &mut s.provers.prover_reshuffle,
         &mut r_prime,
-        &s.poker_params.pp,
+        &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         new_deck,
         &player.cards_public,
@@ -1435,31 +1491,30 @@ fn send_remask_for_reshuffle(
                 .map(|chunk| serde_json::to_vec(chunk).unwrap_or_default())
                 .collect();
 
-            let public_strings = deserializar_chunks_a_strings(serialized_chunks.clone())?;
+            // let public_strings = deserializar_chunks_a_strings(serialized_chunks.clone())?;
             // println!("Public strings: {:?}", public_strings);
 
             for (i, chunk) in serialized_chunks.iter().enumerate() {
                 if let Err(e) = send_protocol_message(
-                    state,
-                    &ProtocolMessage::ZKProofRemoveAndRemaskChunk(
+                    s,
+                    ProtocolMessage::ZKProofRemoveAndRemaskChunk(
                         i as u8,
                         length as u8,
                         chunk.clone(),
                     ),
                 ) {
                     error!("Error sending zk proof chunk {}: {:?}", i, e);
-                    return Err(e.into());
+                    return Err(format!("{:?}", e).into());
                 }
             }
 
             // Enviar la prueba por separado
             let proof_bytes = serialize_proof(&proof)?;
-            if let Err(e) = send_protocol_message(
-                    state,
-                &ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes),
-            ) {
+            if let Err(e) =
+                send_protocol_message(s, ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes))
+            {
                 error!("Error sending zk proof: {:?}", e);
-                return Err(e.into());
+                return Err(format!("{:?}", e).into());
             }
 
             Ok((public, proof))

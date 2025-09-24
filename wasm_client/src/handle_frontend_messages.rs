@@ -1,151 +1,201 @@
 use wasm_bindgen::prelude::*;
-
-use poker_state::PokerState;
-
-use std::cell::RefCell;
-use std::rc::Rc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+
+use crate::poker_state::{GamePhase, PokerState};
+use texas_holdem::{InternalPlayer, PublicKey, RevealProof, RevealToken};
+
+use ark_ff::to_bytes;
+use log::{error, info};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use log::{info, error};
-use texas_holdem::InternalPlayer;
-use wasm_bindgen::JsCast;
+use std::cell::RefCell;
+use std::rc::Rc;
 
+use crate::handle_poker_messages::{
+    send_protocol_message, serialize_canonical, ProtocolMessage, PublicKeyInfoEncoded,
+    ERROR_DECK_NOT_SET, ERROR_NAME_BYTES_NOT_SET, ERROR_PLAYER_NOT_SET,
+};
 
-use handle_poker_messages::{ERROR_NAME_BYTES_NOT_SET, ERROR_PLAYER_NOT_SET, ProtocolMessage, PublicKeyInfoEncoded, send_protocol_message, serialize_canonical};
-
-
-pub fn send_public_key(state: Rc<RefCell<PokerState>>, public_key: String) {
-
-    let s = state.borrow_mut();
-    name = Some(player_address.to_string());
-    name_bytes = Some(to_bytes![player_address.as_bytes()].unwrap());
-    let mut rng2 = StdRng::from_entropy(); 
-    let mut _player = InternalPlayer::new(rng2, &s.poker_params.pp, &name_bytes.as_ref().expect(ERROR_NAME_BYTES_NOT_SET)).expect("Failed to create player");
-    s.my_player = Some(_player.clone());
+pub fn send_public_key(state: Rc<RefCell<PokerState>>, player_address: String) {
+    let pp = {
+        let s_ro = state.borrow();
+        s_ro.pp.clone()
+    };
+    let mut s = state.borrow_mut();
+    s.my_name = Some(player_address.to_string());
+    s.my_name_bytes = Some(to_bytes![player_address.as_bytes()].unwrap());
+    let mut rng2 = StdRng::from_entropy();
+    let player = InternalPlayer::new(
+        &mut rng2,
+        &pp,
+        &s.my_name_bytes.as_ref().expect(ERROR_NAME_BYTES_NOT_SET),
+    )
+    .expect("Failed to create player");
+    s.my_player = Some(player.clone());
 
     // 1) enviar public key info
     info!("(Rust) >> Enviando PublicKeyInfo");
 
-    let player_clone = player.as_ref().expect(ERROR_PLAYER_NOT_SET).clone();
-    
-    let verify_public_key_clone = state.verify_public_key.clone();
+    let player_clone = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET).clone();
 
+    let verify_public_key_clone = s.verify_public_key.clone();
 
-    let r = js_sys::String::from(format!("{:?}", player_clone.proof_key.random_commit.to_string()));
-    let s = js_sys::String::from(format!("{:?}", player_clone.proof_key.opening.to_string()));
+    let r = format!("{:?}", player_clone.proof_key.random_commit.to_string());
+    let s_str = format!("{:?}", player_clone.proof_key.opening.to_string());
 
-    let public_key_value = js_sys::String::from(format!("{:?}", player_clone.pk.to_string()));
-    verify_public_key_clone.call2(&JsValue::NULL, public_key_value, r, s);
-    
+    let public_key_value = format!("{:?}", player_clone.pk.to_string());
+    verify_public_key_clone.call3(
+        &JsValue::NULL,
+        &JsValue::from_str(&public_key_value),
+        &JsValue::from_str(&r),
+        &JsValue::from_str(&s_str),
+    );
+
     let public_key_info = PublicKeyInfoEncoded {
-        name: name_bytes.as_ref().expect(ERROR_NAME_BYTES_NOT_SET).clone(),
-        public_key: serialize_canonical(&player.as_ref().expect(ERROR_PLAYER_NOT_SET).pk).unwrap(),
-        proof_key: serialize_canonical(&player.as_ref().expect(ERROR_PLAYER_NOT_SET).proof_key).unwrap(),
+        name: s
+            .my_name_bytes
+            .as_ref()
+            .expect(ERROR_NAME_BYTES_NOT_SET)
+            .clone(),
+        public_key: serialize_canonical(&player.pk).unwrap(),
+        proof_key: serialize_canonical(&player.proof_key).unwrap(),
     };
     let message = ProtocolMessage::PublicKeyInfo(public_key_info);
-    if let Err(e) = send_protocol_message(state, &message) {
+    if let Err(e) = send_protocol_message(&mut *s, message) {
         error!("Error sending public key info: {:?}", e);
     }
 }
 
-pub fn set_player_id(state: Rc<RefCell<PokerState>>,  player_id: String) {
-    let s = state.borrow_mut();
+pub fn set_player_id(state: Rc<RefCell<PokerState>>, player_id: String) {
+    let mut s = state.borrow_mut();
     s.my_id = Some(player_id.to_string());
 }
 
 pub fn change_phase(state: Rc<RefCell<PokerState>>, phase: GamePhase) {
-
-    if(phase == GamePhase::Flop) {
+    if phase == GamePhase::Flop {
         handle_flop(state);
-    }
-    else if(phase == GamePhase::Turn) {
+    } else if phase == GamePhase::Turn {
         handle_turn(state);
-    }
-    else if(phase == GamePhase::River) {
+    } else if phase == GamePhase::River {
         handle_river(state);
+    }
+}
+
+pub fn handle_turn(state: Rc<RefCell<PokerState>>) {
+    info!("(Rust) >> Turn!");
+    let pp = {
+        let s_ro = state.borrow();
+        s_ro.pp.clone()
+    };
+    let mut s = state.borrow_mut();
+    let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
+    let mut rng = StdRng::from_entropy();
+    let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
+
+    let reveal_token_turn: (RevealToken, RevealProof, PublicKey) = player
+        .compute_reveal_token(&mut rng, &pp, &current_deck[3])
+        .expect("Failed to compute reveal token for turn");
+
+    // Send the reveal token for turn
+    let message = ProtocolMessage::RevealTokenCommunityCards(
+        vec![serialize_canonical(&reveal_token_turn.0).unwrap()],
+        serialize_canonical(&reveal_token_turn.1).unwrap(),
+    );
+
+    if let Err(e) = send_protocol_message(&mut *s, message) {
+        error!("Error sending turn reveal token: {:?}", e);
     }
 }
 
 pub fn handle_flop(state: Rc<RefCell<PokerState>>) {
     info!("(Rust) >> Flop!");
-    let s = state.borrow_mut();
+    let pp = {
+        let s_ro = state.borrow();
+        s_ro.pp.clone()
+    };
+    let mut s = state.borrow_mut();
     let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-    let rng = s.poker_params.rng;
-    let pp = s.poker_params.pp;
+    let mut rng = StdRng::from_entropy();
     let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
 
-    let reveal_token_flop1: (RevealToken, RevealProof, PublicKey) = player.compute_reveal_token(rng, &pp, &current_deck[0])?;
-    let reveal_token_flop2: (RevealToken, RevealProof, PublicKey) = player.compute_reveal_token(rng, &pp, &current_deck[1])?;
-    let reveal_token_flop3: (RevealToken, RevealProof, PublicKey) = player.compute_reveal_token(rng, &pp, &current_deck[2])?;
+    let reveal_token_flop1: (RevealToken, RevealProof, PublicKey) = player
+        .compute_reveal_token(&mut rng, &pp, &current_deck[0])
+        .expect("Failed to compute reveal token for flop1");
+    let reveal_token_flop2: (RevealToken, RevealProof, PublicKey) = player
+        .compute_reveal_token(&mut rng, &pp, &current_deck[1])
+        .expect("Failed to compute reveal token for flop2");
+    let reveal_token_flop3: (RevealToken, RevealProof, PublicKey) = player
+        .compute_reveal_token(&mut rng, &pp, &current_deck[2])
+        .expect("Failed to compute reveal token for flop3");
 
-    let reveal_token_flop1_bytes = serialize_canonical(&reveal_token_flop1)?;
-    let reveal_token_flop2_bytes = serialize_canonical(&reveal_token_flop2)?;
-    let reveal_token_flop3_bytes = serialize_canonical(&reveal_token_flop3)?;
+    let reveal_token_flop1_bytes =
+        serialize_canonical(&reveal_token_flop1).expect("Failed to serialize reveal token flop1");
+    let reveal_token_flop2_bytes =
+        serialize_canonical(&reveal_token_flop2).expect("Failed to serialize reveal token flop2");
+    let reveal_token_flop3_bytes =
+        serialize_canonical(&reveal_token_flop3).expect("Failed to serialize reveal token flop3");
 
-    let message = ProtocolMessage::RevealTokenCommunityCards(vec![reveal_token_flop1_bytes, reveal_token_flop2_bytes, reveal_token_flop3_bytes], vec![0, 1, 2]);
+    let message = ProtocolMessage::RevealTokenCommunityCards(
+        vec![
+            reveal_token_flop1_bytes,
+            reveal_token_flop2_bytes,
+            reveal_token_flop3_bytes,
+        ],
+        vec![0, 1, 2],
+    );
 
-    if let Err(e) = send_protocol_message(state, &message) {
-        println!("Error sending reveal token community cards: {:?}", e);
-    }
-}
-
-
-pub fn handle_flop(state: Rc<RefCell<PokerState>>) {
-    info!("(Rust) >> Turn!");
-    let s = state.borrow_mut();
-    let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-    let rng = s.poker_params.rng;
-    let pp = s.poker_params.pp;
-    let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
-    
-    let reveal_token_turn: (RevealToken, RevealProof, PublicKey) = player.compute_reveal_token(rng, &pp, &current_deck[0])?;
-
-    let reveal_token_turn_bytes = serialize_canonical(&reveal_token_turn)?;
-
-    let message = ProtocolMessage::RevealTokenCommunityCards(vec![reveal_token_turn_bytes], vec![3]);
-
-    if let Err(e) = send_protocol_message(state, &message) {
+    if let Err(e) = send_protocol_message(&mut *s, message) {
         println!("Error sending reveal token community cards: {:?}", e);
     }
 }
 
 pub fn handle_river(state: Rc<RefCell<PokerState>>) {
     info!("(Rust) >> River!");
-    let s = state.borrow();
+    let pp = {
+        let s_ro = state.borrow();
+        s_ro.pp.clone()
+    };
+    let mut s = state.borrow_mut();
     let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-    let rng = s.poker_params.rng;
-    let pp = s.poker_params.pp;
+    let mut rng = StdRng::from_entropy();
     let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
 
-    let reveal_token_river: (RevealToken, RevealProof, PublicKey) = player.compute_reveal_token(rng, &pp, &current_deck[0])?;
+    let reveal_token_river: (RevealToken, RevealProof, PublicKey) = player
+        .compute_reveal_token(&mut rng, &pp, &current_deck[4])
+        .expect("Failed to compute reveal token for river");
 
-    let reveal_token_river_bytes = serialize_canonical(&reveal_token_river)?;
+    let reveal_token_river_bytes =
+        serialize_canonical(&reveal_token_river).expect("Failed to serialize reveal token river");
 
-    let message = ProtocolMessage::RevealTokenCommunityCards(vec![reveal_token_river_bytes], vec![4]);
+    let message =
+        ProtocolMessage::RevealTokenCommunityCards(vec![reveal_token_river_bytes], vec![4]);
 
-    if let Err(e) = send_protocol_message(state, &message) {
-        println!("Error sending reveal token community cards: {:?}", e);
+    if let Err(e) = send_protocol_message(&mut *s, message) {
+        error!("Error sending reveal token community cards: {:?}", e);
     }
 }
 
 pub fn reveal_all_cards(state: Rc<RefCell<PokerState>>) {
     info!("(Rust) >> Reveal all cards!");
-    let s = state.borrow();
+    let pp = {
+        let s_ro = state.borrow();
+        s_ro.pp.clone()
+    };
+    let mut s = state.borrow_mut();
     let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
     let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
-    let rng = s.poker_params.rng;
-    let pp = s.poker_params.pp;
+    let mut rng = StdRng::from_entropy();
     let mut reveal_all_cards_bytes = vec![];
     for card in current_deck {
-        let reveal_token: (RevealToken, RevealProof, PublicKey) = player.compute_reveal_token(rng, &pp, &card)?;
-        let reveal_token_bytes = serialize_canonical(&reveal_token)?;
+        let reveal_token: (RevealToken, RevealProof, PublicKey) = player
+            .compute_reveal_token(&mut rng, &pp, &card)
+            .expect("Failed to compute reveal token");
+        let reveal_token_bytes =
+            serialize_canonical(&reveal_token).expect("Failed to serialize reveal token");
         reveal_all_cards_bytes.push(reveal_token_bytes);
     }
     let message = ProtocolMessage::RevealAllCards(reveal_all_cards_bytes);
-    if let Err(e) = send_protocol_message(state, &message) {
+    if let Err(e) = send_protocol_message(&mut *s, message) {
         println!("Error sending reveal all cards: {:?}", e);
     }
-
 }

@@ -467,31 +467,6 @@ fn host_session(ws: WebSocket) {
 }
 
 
-fn peer_a_dc_on_message(dc: RtcDataChannel) -> Closure<dyn FnMut(MessageEvent)> {
-    Closure::wrap(Box::new(move |ev: MessageEvent| {
-        if let Some(message) = ev.data().as_string() {
-            // Deserializar el mensaje del protocolo
-            if let Ok(protocol_msg) = serde_json_wasm::from_str::<ProtocolMessage>(&message) {
-                match protocol_msg {
-                    ProtocolMessage::Text(data) => {
-                        if let Ok(text) = String::from_utf8(data) {
-                            info!("Received text message: {}", text);
-                            add_message_to_chat(&format!("Peer: {}", text));
-                        }
-                    }
-                    ProtocolMessage::Proof(data) => {
-                        info!("Received proof message: {:?}", data);
-                        // Procesar la prueba aquí
-                    }
-                   
-                }
-            } else {
-                warn!("Failed to deserialize protocol message: {}", message);
-            }
-        }
-    }) as Box<dyn FnMut(MessageEvent)>)
-}
-
 pub async fn setup_initiator(
     peer_a: RtcPeerConnection,
     websocket: WebSocket,
@@ -514,9 +489,18 @@ pub async fn setup_initiator(
     info!("dc1 created: label {:?}", dc1.label());
 
     let dc1_clone = dc1.clone();
-    let onmessage_callback = peer_a_dc_on_message(dc1_clone);
+
+    let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
+        if let Some(message) = ev.data().as_string() {
+            handle_poker_message(message, poker_state.clone(), dc1_clone, peer_a_clone_external);
+        }
+    }) as Box<dyn FnMut(MessageEvent)>);
+
+
     dc1.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
     onmessage_callback.forget();
+
+    
 
     let btn_cb = Closure::wrap(Box::new(move || {
         let ws_clone = ws_clone_external.clone();
