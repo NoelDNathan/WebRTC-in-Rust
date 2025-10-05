@@ -1,56 +1,87 @@
+// mental-poker-reshuffle/WebRTC-in-Rust/common-wasm/src/lib.rs
+use wasm_bindgen::prelude::*;
+use serde::{Deserialize, Serialize};
+
+// Re-exportar las funciones que necesitas de common.rs
 mod common;
-mod ice;
-mod sdp;
-mod utils;
-mod websockets;
-mod poker_state;
-mod handle_poker_messages;
-mod handle_frontend_messages;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+// Exponer las funciones que quieres usar en React
+#[wasm_bindgen]
+pub fn init_poker_state() {
+    common::init_poker_state();
+}
 
-use log::info;
-use wasm_bindgen::prelude::wasm_bindgen;
-use wasm_bindgen::UnwrapThrowExt;
+#[wasm_bindgen]
+pub fn get_poker_game_state() -> Option<JsValue> {
+    if let Some(state) = common::get_poker_game_state() {
+        JsValue::from_serde(&state).ok()
+    } else {
+        None
+    }
+}
 
-use common::{
-    create_plain_peer_connection, create_stun_peer_connection, create_turn_peer_connection,
-    setup_chat_functionality, setup_initiator, setup_listener, setup_show_signalling_server_state,
-    setup_show_state, AppState,
-};
-use ice::{received_new_ice_candidate, setup_rtc_peer_connection_ice_callbacks};
-use sdp::{create_sdp_offer, receive_sdp_answer, receive_sdp_offer_send_answer};
-use utils::set_panic_hook;
-use websockets::open_web_socket;
+#[wasm_bindgen]
+pub fn create_plain_peer_connection() -> Result<web_sys::RtcPeerConnection, JsValue> {
+    common::create_plain_peer_connection()
+}
 
-#[wasm_bindgen(start)]
-pub async fn start() {
-    set_panic_hook();
+#[wasm_bindgen]
+pub fn create_stun_peer_connection() -> Result<web_sys::RtcPeerConnection, JsValue> {
+    common::create_stun_peer_connection()
+}
 
-    wasm_logger::init(wasm_logger::Config::new(log::Level::Debug));
+#[wasm_bindgen]
+pub fn serialize_signal(signal_json: &str) -> Result<String, String> {
+    let signal: shared_protocol::SignalEnum = serde_json::from_str(signal_json)
+        .map_err(|e| format!("Deserialization error: {}", e))?;
+    common::serialize_signal(&signal)
+}
 
-    let state: Rc<RefCell<AppState>> = Rc::new(RefCell::new(AppState::new()));
+#[wasm_bindgen]
+pub fn deserialize_signal(message: &str) -> Result<String, String> {
+    let signal = common::deserialize_signal(message)?;
+    serde_json::to_string(&signal)
+        .map_err(|e| format!("Serialization error: {}", e))
+}
 
-    let rtc_connection = create_plain_peer_connection().unwrap_throw();
+// Estructuras que necesitas exponer
+#[derive(Serialize, Deserialize)]
+pub struct PokerGameState {
+    pub room_id: Option<String>,
+    pub my_id: Option<u8>,
+    pub my_name: Option<String>,
+    pub current_dealer: u8,
+    pub num_players_connected: u8,
+    pub current_shuffler: u8,
+    pub current_reshuffler: u8,
+    pub is_reshuffling: bool,
+    pub is_all_public_reshuffle_bytes_received: bool,
+    pub is_all_public_shuffle_bytes_received: bool,
+}
 
-    let websocket = open_web_socket(rtc_connection.clone(), state.clone())
-        .await
-        .unwrap_throw();
+#[wasm_bindgen]
+pub struct AppState {
+    session_id: Option<String>,
+    user_id: Option<String>,
+}
 
-    setup_show_state(rtc_connection.clone(), state.clone());
-    setup_show_signalling_server_state(websocket.clone());
+#[wasm_bindgen]
+impl AppState {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> AppState {
+        AppState {
+            session_id: None,
+            user_id: None,
+        }
+    }
 
-    // Setup chat functionality
-    setup_chat_functionality(websocket.clone(), state.clone()).unwrap_throw();
+    #[wasm_bindgen(getter)]
+    pub fn session_id(&self) -> Option<String> {
+        self.session_id.clone()
+    }
 
-    setup_initiator(rtc_connection.clone(), websocket.clone(), state.clone())
-        .await
-        .unwrap_throw();
-    info!("Setup Initiator");
-
-    setup_listener(rtc_connection.clone(), websocket.clone(), state.clone())
-        .await
-        .unwrap_throw();
-    info!("Setup Listener");
+    #[wasm_bindgen(setter)]
+    pub fn set_session_id(&mut self, session_id: String) {
+        self.session_id = Some(session_id);
+    }
 }
