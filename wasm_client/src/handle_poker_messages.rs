@@ -1,4 +1,3 @@
-use crate::common::add_message_to_chat;
 use crate::poker_state::{PlayerInfo, PokerState};
 use ark_ff::to_bytes;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -64,7 +63,7 @@ pub struct PublicKeyInfoEncoded {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProtocolMessage {
-    Text(Vec<u8>),
+    // Text(Vec<u8>),
     RevealToken(u8, Vec<u8>, Vec<u8>),
     RevealTokenCommunityCards(Vec<Vec<u8>>, Vec<u8>),
     EncodedCards(Vec<u8>),
@@ -86,12 +85,12 @@ pub fn handle_poker_message(
     // Deserializar el mensaje del protocolo
     if let Ok(protocol_msg) = serde_json_wasm::from_str::<ProtocolMessage>(&message) {
         match protocol_msg {
-            ProtocolMessage::Text(data) => {
-                if let Ok(text) = String::from_utf8(data) {
-                    info!("Received text message: {}", text);
-                    add_message_to_chat(&format!("Peer: {}", text));
-                }
-            }
+            // ProtocolMessage::Text(data) => {
+            //     if let Ok(text) = String::from_utf8(data) {
+            //         info!("Received text message: {}", text);
+            //         add_message_to_chat(&format!("Peer: {}", text));
+            //     }
+            // }
             ProtocolMessage::PublicKeyInfo(public_key_info) => {
                 info!("Received public key info");
                 handle_public_key_info_received(

@@ -31,7 +31,8 @@ futures = "0.3"
 babyjubjub = {path = "../../babyjubjub"}
 barnett-smart-card-protocol = {path = "../../barnett-smart-card-protocol"}
 proof-essentials = {path = "../../proof-essentials"}
-zk-reshuffle = {path = "../../zk-reshuffle"}
+zk-reshuffle = {path = "../../workspace-ark05/zk-reshuffle"}
+ark-bn254 = "0.5.0"
 
 texas-holdem = {path = "../../texas-holdem"}
 
