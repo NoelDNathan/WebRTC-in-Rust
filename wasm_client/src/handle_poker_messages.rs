@@ -40,6 +40,10 @@ const ERROR_RECEIVED_REVEAL_TOKENS2_NOT_SET: &str = "Received reveal tokens 2 sh
 const ERROR_SHUFFLE_REMASK_FAILDED: &str = "Shuffle and remask failed";
 const ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED: &str = "Deserialize reveal token failed";
 const ERROR_DESERIALIZE_PROOF_FAILED: &str = "Deserialize proof failed";
+const ERROR_PLAYERINFO_ID_NOT_SET: &str = "PlayerInfo id should be set";
+const ERROR_PLAYERINFO_NAME_NOT_SET: &str = "PlayerInfo name should be set";
+const ERROR_PLAYERINFO_PUBLIC_KEY_NOT_SET: &str = "PlayerInfo public key should be set";
+const ERROR_PLAYERINFO_PROOF_KEY_NOT_SET: &str = "PlayerInfo proof key should be set";
 
 const M: usize = 2;
 const N: usize = 26;
@@ -59,6 +63,7 @@ pub struct PublicKeyInfoEncoded {
     pub(crate) name: Vec<u8>,
     pub(crate) public_key: Vec<u8>,
     pub(crate) proof_key: Vec<u8>,
+    pub(crate) player_id: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -82,8 +87,15 @@ pub fn handle_poker_message(
     data_channel: RtcDataChannel,
     peer_connection: RtcPeerConnection,
 ) {
+    info!("🔄 Processing poker protocol message");
+    info!("📝 Raw message: {}", message);
+
     // Deserializar el mensaje del protocolo
     if let Ok(protocol_msg) = serde_json_wasm::from_str::<ProtocolMessage>(&message) {
+        info!(
+            "✅ Successfully deserialized protocol message: {:?}",
+            std::mem::discriminant(&protocol_msg)
+        );
         match protocol_msg {
             // ProtocolMessage::Text(data) => {
             //     if let Ok(text) = String::from_utf8(data) {
@@ -157,7 +169,8 @@ pub fn handle_poker_message(
             }
         }
     } else {
-        warn!("Failed to deserialize protocol message: {}", message);
+        error!("❌ Failed to deserialize protocol message: {}", message);
+        error!("📝 Message length: {} characters", message.len());
     }
 }
 
@@ -199,32 +212,25 @@ fn handle_public_key_info_received(
         let name_bytes = to_bytes![name.as_bytes()].unwrap();
         s.pk_proof_info_array.push((pk_val, proof_val, name_bytes));
 
-        let new_player_id = match name.strip_prefix("Player ") {
-            Some(id_str) => id_str
-                .parse::<u8>()
-                .unwrap_or(s.num_players_connected as u8),
-            None => s.num_players_connected as u8,
-        };
+        let new_player_id = public_key_info.player_id;
 
         info!("Number of players: {:?}", s.num_players_connected);
 
         match CardProtocol::verify_key_ownership(&s.pp, &pk_val, &name.as_bytes(), &proof_val) {
             Ok(_) => {
-                // Asocia el nombre del jugador con su peer_id
-                s.players_connected.insert(
-                    get_peer_id(peer_connection.clone()),
-                    PlayerInfo {
-                        peer_connection: peer_connection,
-                        data_channel: data_channel,
-                        name: name.clone(),
-                        id: new_player_id,
-                        public_key: pk_val.clone(),
-                        proof_key: proof_val.clone(),
-                        cards: [None, None],
-                        cards_public: [None, None],
-                        reveal_tokens: [vec![], vec![]],
-                    },
-                );
+                // Update existing player entry instead of inserting a new one
+                let peer_id = get_peer_id(peer_connection.clone());
+                if let Some(player_info) = s.players_info.get_mut(&peer_id) {
+                    player_info.name = Some(name.clone());
+                    player_info.id = Some(new_player_id);
+                    player_info.public_key = Some(pk_val.clone());
+                    player_info.proof_key = Some(proof_val.clone());
+                } else {
+                    warn!(
+                        "Attempted to update player {}, but entry was not found. Skipping update.",
+                        peer_id
+                    );
+                }
             }
             Err(e) => error!("Error verifying proof key ownership: {:?}", e),
         }
@@ -361,7 +367,7 @@ fn handle_shuffled_and_remasked_cards_received(
                         let card2 = current_deck[i as usize * 2 + 5 + 1];
 
                         // Find the player with the id equal to i, and assign the cards to him
-                        match find_player_by_id(&mut s.players_connected, i as u8) {
+                        match find_player_by_id(&mut s.players_info, i as u8) {
                             Some((_, player_info)) => {
                                 let mut rng = StdRng::from_entropy();
                                 let reveal_token1: (RevealToken, RevealProof, PublicKey) =
@@ -419,6 +425,8 @@ fn handle_shuffled_and_remasked_cards_received(
                             }
                         }
                     }
+                    // Restore the player after all operations are complete
+                    s.my_player = Some(player);
                 }
             }
             info!("Shuffle verified")
@@ -469,7 +477,7 @@ fn handle_reveal_token_received(
             .parse::<u8>()
             .unwrap()
     {
-        match find_player_by_id(&mut s.players_connected, id) {
+        match find_player_by_id(&mut s.players_info, id) {
             Some((_, player_info)) => {
                 info!("Received reveal token from player {}", id);
                 info!("Received reveal token from player {}", id);
@@ -619,6 +627,9 @@ fn handle_reveal_token_received(
                 error!("Error peeking at both cards: {:?}, {:?}", e1, e2)
             }
         }
+
+        // Restore the player after all operations are complete
+        s.my_player = Some(player);
     }
 }
 
@@ -672,13 +683,13 @@ fn handle_reveal_token_community_cards_received(
                     // Convert Rc<RevealProof> back to RevealProof for the function call
                     let tokens_for_open: Vec<(RevealToken, RevealProof, PublicKey)> = s
                         .community_cards_tokens[index]
-                        .iter()
+                        .drain(..) // Use drain to move elements out of the vector
                         .map(|(token, proof_rc, key)| {
                             (
-                                token.clone(),
-                                Rc::try_unwrap(proof_rc.clone())
+                                token,
+                                Rc::try_unwrap(proof_rc)
                                     .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                                key.clone(),
+                                key,
                             )
                         })
                         .collect();
@@ -818,7 +829,7 @@ fn handle_zk_proof_shuffle_chunk_received(
     let mut s = state.borrow_mut();
     s.public_shuffle_bytes.push((i, chunk.clone()));
 
-    if s.public_shuffle_bytes.len() - 1 == length as usize {
+    if s.public_shuffle_bytes.len() == length as usize {
         s.is_all_public_shuffle_bytes_received = true;
         if s.proof_shuffle_bytes.is_empty() {
             error!("No shuffle proof bytes yet");
@@ -864,33 +875,60 @@ pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Re
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {:?}", e)))?;
 
     let mut errors = Vec::new();
+    info!(
+        "📤 Sending protocol message to {} players",
+        s.players_info.len()
+    );
+    info!("📝 Message type: {:?}", std::mem::discriminant(&message));
 
     // Send to all connected players
-    for (_, player_info) in &s.players_connected {
+    for (peer_id, player_info) in &s.players_info {
+        let player_id = player_info
+            .id
+            .as_ref()
+            .expect(ERROR_PLAYERINFO_ID_NOT_SET)
+            .clone();
+        info!(
+            "🎯 Attempting to send to player {} (peer: {})",
+            player_id, peer_id
+        );
+        info!(
+            "📊 Data channel state: {:?}",
+            player_info.data_channel.ready_state()
+        );
+
         if player_info.data_channel.ready_state() == web_sys::RtcDataChannelState::Open {
             if let Err(e) = player_info.data_channel.send_with_str(&serialized_message) {
-                errors.push(format!(
-                    "Error sending to player {}: {:?}",
-                    player_info.id, e
-                ));
+                error!("❌ Error sending to player {}: {:?}", player_id, e);
+                errors.push(format!("Error sending to player {}: {:?}", player_id, e));
             } else {
-                info!("Message sent successfully to player {}", player_info.id);
+                info!("✅ Message sent successfully to player {}", player_id);
             }
         } else {
+            warn!(
+                "⚠️ DataChannel not open for player {} (state: {:?})",
+                player_id,
+                player_info.data_channel.ready_state()
+            );
             errors.push(format!(
-                "DataChannel not open for player {}",
-                player_info.id
+                "DataChannel not open for player {} (state: {:?})",
+                player_id,
+                player_info.data_channel.ready_state()
             ));
         }
     }
 
     if !errors.is_empty() {
+        error!("❌ Broadcast errors: {:?}", errors);
         return Err(JsValue::from_str(&format!(
             "Broadcast errors: {:?}",
             errors
         )));
     }
-    info!("ProtocolMessage sent successfully: {:?}", message);
+    info!(
+        "✅ ProtocolMessage sent successfully to all players: {:?}",
+        message
+    );
     Ok(())
 }
 
@@ -900,7 +938,14 @@ fn find_player_by_id(
 ) -> Option<(&String, &mut PlayerInfo)> {
     players_connected
         .iter_mut()
-        .find(|(_, player_info)| player_info.id == id)
+        .find(|(_, player_info)| {
+            player_info
+                .id
+                .as_ref()
+                .expect(ERROR_PLAYERINFO_ID_NOT_SET)
+                .clone()
+                == id
+        })
         .map(|(peer_id, player_info)| (peer_id, player_info))
 }
 
@@ -965,7 +1010,7 @@ fn deserializar_chunks_a_strings(
     Ok(resultado)
 }
 
-fn get_peer_id(peer_connection: RtcPeerConnection) -> String {
+pub fn get_peer_id(peer_connection: RtcPeerConnection) -> String {
     let mut hasher = DefaultHasher::new();
     // Use the object's memory address or some unique property
     std::ptr::addr_of!(peer_connection).hash(&mut hasher);
@@ -1222,7 +1267,7 @@ fn process_reshuffle_verification(
         (s_ro.pp.clone(), s_ro.num_players_connected)
     };
 
-    match find_player_by_id(&mut s.players_connected, current_reshuffler) {
+    match find_player_by_id(&mut s.players_info, current_reshuffler) {
         Some((_, player_info)) => {
             let (player_cards, player_pk) = {
                 let cards: Vec<MaskedCard> = player_info
@@ -1230,7 +1275,14 @@ fn process_reshuffle_verification(
                     .iter()
                     .filter_map(|card| card.clone())
                     .collect();
-                (cards, player_info.public_key.clone())
+                (
+                    cards,
+                    player_info
+                        .public_key
+                        .as_ref()
+                        .expect(ERROR_PLAYERINFO_PUBLIC_KEY_NOT_SET)
+                        .clone(),
+                )
             };
 
             match verify_remask_for_reshuffle(s, player_cards, &player_pk) {
@@ -1269,14 +1321,20 @@ fn process_reshuffle_verification(
                                         info!("Starting shuffling and remasking");
                                         let shuffled_deck =
                                             shuffle_remask_and_send(&mut *s, &final_deck)?;
+                                        // Restore the player before returning
+                                        s.my_player = Some(player);
                                         return Ok((shuffled_deck, new_reshuffler));
                                     }
                                 }
 
+                                // Restore the player before returning
+                                s.my_player = Some(player);
                                 return Ok((final_deck, new_reshuffler));
                             }
                             Err(e) => {
                                 error!("Error sending remask for reshuffle: {:?}", e);
+                                // Restore the player before returning error
+                                s.my_player = Some(player);
                                 return Err(format!("{:?}", e).into());
                             }
                         }
@@ -1452,7 +1510,7 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
 
                     info!("Pushing reveal tokens to player {}", i);
 
-                    match find_player_by_id(&mut s.players_connected, i as u8) {
+                    match find_player_by_id(&mut s.players_info, i as u8) {
                         Some((_, player_info)) => {
                             player_info.cards = [Some(card1), Some(card2)];
                             player_info.reveal_tokens[0].push(new_token1_rc);
@@ -1491,10 +1549,14 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                 }
             }
             info!("Shuffle verified");
+            // Restore the player after all operations are complete
+            s.my_player = Some(player);
             Ok(())
         }
         Err(e) => {
             error!("Error verifying shuffle remask: {:?}", e);
+            // Restore the player even in error case
+            s.my_player = Some(player);
             Err(Box::new(e))
         }
     }

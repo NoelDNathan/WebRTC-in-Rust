@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 use std::rc::Rc;
 
+use crate::handle_poker_messages::get_peer_id;
+use crate::poker_state::PlayerInfo;
 use barnett_smart_card_protocol::BarnettSmartProtocol;
 use js_sys::{Array, Function, Object, Promise, Reflect};
 use log::{debug, error, info, warn};
@@ -79,6 +81,50 @@ impl Default for ReactCallbacks {
 // WASM-BINDGEN EXPORTED FUNCTIONS FOR REACT
 // ============================================
 
+use crate::handle_frontend_messages as frontend_msgs;
+use crate::poker_state::GamePhase;
+
+#[wasm_bindgen]
+pub fn poker_send_public_key() {
+    if let Some(state) = get_poker_state() {
+        frontend_msgs::send_public_key(state);
+    }
+}
+
+#[wasm_bindgen]
+pub fn poker_create_player(player_address: String, player_id: u8) {
+    if let Some(state) = get_poker_state() {
+        frontend_msgs::create_player(state, player_address, player_id);
+    }
+}
+
+#[wasm_bindgen]
+pub fn poker_change_phase(phase: String) {
+    if let Some(state) = get_poker_state() {
+        let phase_enum = match phase.as_str() {
+            "Flop" => GamePhase::Flop,
+            "Turn" => GamePhase::Turn,
+            "River" => GamePhase::River,
+            other => {
+                log::error!("Invalid phase: {}", other);
+                return;
+            }
+        };
+        frontend_msgs::change_phase(state, phase_enum);
+    }
+}
+
+#[wasm_bindgen]
+pub fn poker_reveal_all_cards() {
+    if let Some(state) = get_poker_state() {
+        frontend_msgs::reveal_all_cards(state);
+    }
+}
+
+// ============================================
+// WASM-BINDGEN EXPORTED FUNCTIONS FOR REACT
+// ============================================
+
 /// Register callbacks from React
 #[wasm_bindgen]
 pub fn register_callbacks(
@@ -140,12 +186,17 @@ pub fn register_poker_callbacks(
 /// Create a new session (host)
 #[wasm_bindgen]
 pub async fn create_session(websocket_url: String, use_stun: bool) -> Result<JsValue, JsValue> {
+    info!("create_session");
+
     let app_state = get_or_create_app_state();
 
     let peer_connection = create_plain_peer_connection()?;
+    info!("peer_connection: {:?}", peer_connection.signaling_state());
 
     let websocket =
         crate::websockets::open_web_socket(peer_connection.clone(), app_state.clone()).await?;
+
+    info!("websocket: {:?}", websocket.ready_state());
 
     // Setup ICE callbacks
     setup_rtc_peer_connection_ice_callbacks_react(
@@ -154,8 +205,9 @@ pub async fn create_session(websocket_url: String, use_stun: bool) -> Result<JsV
         app_state.clone(),
     )
     .await?;
+    info!("setup_rtc_peer_connection_ice_callbacks_react");
 
-    // Setup data channel for poker messages
+    // Setup data channel listener for incoming data channels
     setup_data_channel_listener(peer_connection.clone()).await?;
 
     // Send session creation request
@@ -178,9 +230,12 @@ pub async fn join_session(
     session_id: String,
     use_stun: bool,
 ) -> Result<JsValue, JsValue> {
+    info!("join_session");
+
     let app_state = get_or_create_app_state();
 
     let peer_connection = create_plain_peer_connection()?;
+    info!("peer_connection: {:?}", peer_connection.signaling_state());
 
     let websocket =
         crate::websockets::open_web_socket(peer_connection.clone(), app_state.clone()).await?;
@@ -192,6 +247,7 @@ pub async fn join_session(
         app_state.clone(),
     )
     .await?;
+    info!("setup_rtc_peer_connection_ice_callbacks_react");
 
     // Create data channel (initiator creates it)
     let dc = peer_connection.create_data_channel("poker-channel");
@@ -355,20 +411,29 @@ async fn setup_rtc_peer_connection_ice_callbacks_react(
 }
 
 async fn setup_data_channel_listener(peer_connection: RtcPeerConnection) -> Result<(), JsValue> {
-    let peer_clone = peer_connection.clone();
+    info!("🔧 Setting up data channel listener");
 
+    let peer_clone = peer_connection.clone();
+    info!(
+        "📡 Peer connection signaling state: {:?}",
+        peer_clone.signaling_state()
+    );
     let ondatachannel_callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
         let dc = ev.channel();
-        info!("Data channel received: {}", dc.label());
+        info!("📺 Incoming data channel received: {}", dc.label());
+        info!("📊 Data channel ready state: {:?}", dc.ready_state());
 
         if let Err(e) = setup_data_channel_callbacks(dc, peer_clone.clone()) {
-            error!("Error setting up data channel callbacks: {:?}", e);
+            error!("❌ Error setting up data channel callbacks: {:?}", e);
+        } else {
+            info!("✅ Data channel callbacks set up successfully");
         }
     }) as Box<dyn FnMut(RtcDataChannelEvent)>);
 
     peer_connection.set_ondatachannel(Some(ondatachannel_callback.as_ref().unchecked_ref()));
     ondatachannel_callback.forget();
 
+    info!("✅ Data channel listener setup complete");
     Ok(())
 }
 
@@ -376,14 +441,66 @@ fn setup_data_channel_callbacks(
     data_channel: RtcDataChannel,
     peer_connection: RtcPeerConnection,
 ) -> Result<(), JsValue> {
+    info!("🔧 Setting up data channel callbacks");
+    info!("📺 Data channel label: {:?}", data_channel.label());
+    info!(
+        "📡 Peer connection signaling state: {:?}",
+        peer_connection.signaling_state()
+    );
+    info!(
+        "📊 Data channel ready state: {:?}",
+        data_channel.ready_state()
+    );
+
     let dc_clone = data_channel.clone();
     let peer_clone = peer_connection.clone();
 
+    // Add onopen callback to increment num_players_connected when data channel opens
+    let dc_onopen = data_channel.clone();
+    let peer_onopen = peer_connection.clone();
+    let onopen_callback = Closure::wrap(Box::new(move |_event: JsValue| {
+        info!("Data channel opened successfully");
+        
+        // Increment num_players_connected when data channel opens
+        if let Some(poker_state) = get_poker_state() {
+            let mut s = poker_state.borrow_mut();
+
+            // Add player to players_connected with basic info
+            let peer_id = get_peer_id(peer_onopen.clone());
+            let temp_player_info = PlayerInfo {
+                peer_connection: peer_onopen.clone(),
+                data_channel: dc_onopen.clone(),
+                name: None,
+                id: Some(s.players_info.len() as u8),
+                public_key: None,
+                proof_key: None,
+                cards: [None, None],
+                cards_public: [None, None],
+                reveal_tokens: [vec![], vec![]],
+            };
+
+            s.players_info.insert(peer_id, temp_player_info);
+            info!("Player connected via data channel. Total players: {}", s.players_info.len());
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+
+    data_channel.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
+    onopen_callback.forget();
+
     let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
+        info!("📨 Data channel message received");
+        info!("📊 Message data type: {:?}", ev.data());
+        info!("📝 Message content: {:?}", ev.data().as_string());
+
         if let Some(message) = ev.data().as_string() {
+            info!("🔄 Processing poker protocol message...");
             if let Some(poker_state) = get_poker_state() {
                 handle_poker_message(message, poker_state, dc_clone.clone(), peer_clone.clone());
+            } else {
+                error!("❌ Poker state not available for message processing");
             }
+        } else {
+            warn!("⚠️ Received non-string message on data channel");
         }
     }) as Box<dyn FnMut(MessageEvent)>);
 
@@ -490,11 +607,9 @@ fn create_poker_state() -> PokerState {
     let gen = generator();
     let pp = CardProtocol::setup(&mut rng, gen, 2, 26).expect("Failed to setup CardParameters");
 
-    let prover_reshuffle = CircomProver::new_embedded_reshuffle()
-    .expect("prover_reshuffle failed");
+    let prover_reshuffle = CircomProver::new_embedded_reshuffle().expect("prover_reshuffle failed");
 
-    let prover_shuffle = CircomProver::new_embedded_shuffle()
-    .expect("prover_shuffle failed");
+    let prover_shuffle = CircomProver::new_embedded_shuffle().expect("prover_shuffle failed");
 
     let provers = Provers {
         prover_reshuffle,
@@ -520,7 +635,7 @@ fn create_poker_state() -> PokerState {
         received_reveal_tokens1: Vec::new(),
         received_reveal_tokens2: Vec::new(),
         community_cards_tokens: vec![Vec::new(); 5],
-        players_connected: HashMap::new(),
+        players_info: HashMap::new(),
         public_reshuffle_bytes: Vec::new(),
         proof_reshuffle_bytes: Vec::new(),
         is_reshuffling: false,
@@ -658,6 +773,34 @@ pub async fn handle_message_reply(
             state.set_session_id(session_id.clone());
             drop(state);
 
+            // Create SDP offer and send it to establish WebRTC connection
+            let peer_conn = peer_connection.clone();
+            let ws = websocket.clone();
+            let session_id_clone = session_id.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::sdp::create_sdp_offer(peer_conn.clone()).await {
+                    Ok(offer_sdp) => {
+                        let signal = SignalEnum::VideoOffer(offer_sdp, session_id_clone);
+                        let response: String = match serde_json_wasm::to_string(&signal) {
+                            Ok(x) => x,
+                            Err(e) => {
+                                error!("Could not serialize Video Offer: {}", e);
+                                return;
+                            }
+                        };
+
+                        match ws.send_with_str(&response) {
+                            Ok(_) => info!("Video Offer sent successfully"),
+                            Err(err) => error!("Error sending Video Offer: {:?}", err),
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error creating SDP offer: {:?}", e);
+                    }
+                }
+            });
+
             // Notify React
             notify_session_joined(&session_id.inner());
         }
@@ -666,7 +809,34 @@ pub async fn handle_message_reply(
             notify_session_error(&format!("Could not join session: {}", session_id.inner()));
         }
         SignalEnum::SessionJoin(session_id) => {
-            info!("{}", session_id.inner())
+
+            // Create SDP offer and send it to establish WebRTC connection
+            let peer_conn = peer_connection.clone();
+            let ws = websocket.clone();
+            let session_id_clone = session_id.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::sdp::create_sdp_offer(peer_conn.clone()).await {
+                    Ok(offer_sdp) => {
+                        let signal = SignalEnum::VideoOffer(offer_sdp, session_id_clone);
+                        let response: String = match serde_json_wasm::to_string(&signal) {
+                            Ok(x) => x,
+                            Err(e) => {
+                                error!("Could not serialize Video Offer: {}", e);
+                                return;
+                            }
+                        };
+
+                        match ws.send_with_str(&response) {
+                            Ok(_) => info!("Video Offer sent to joining player"),
+                            Err(err) => error!("Error sending Video Offer: {:?}", err),
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error creating SDP offer: {:?}", e);
+                    }
+                }
+            });
         }
         SignalEnum::NewUser(user_id) => {
             info!("New User Received ! {}", user_id.clone().inner());

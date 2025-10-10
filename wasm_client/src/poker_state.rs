@@ -13,10 +13,10 @@ use zk_reshuffle::CircomProver;
 pub struct PlayerInfo {
     pub peer_connection: RtcPeerConnection,
     pub data_channel: RtcDataChannel,
-    pub name: String,
-    pub id: u8,
-    pub public_key: PublicKey,
-    pub proof_key: ProofKeyOwnership,
+    pub name: Option<String>,
+    pub id: Option<u8>,
+    pub public_key: Option<PublicKey>,
+    pub proof_key: Option<ProofKeyOwnership>,
     pub cards: [Option<MaskedCard>; 2],
     pub cards_public: [Option<MaskedCard>; 2],
     pub reveal_tokens: [Vec<(RevealToken, Rc<RevealProof>, PublicKey)>; 2],
@@ -37,10 +37,10 @@ impl PlayerInfo {
         Self {
             peer_connection,
             data_channel,
-            name,
-            id,
-            public_key,
-            proof_key,
+            name: Some(name),
+            id: Some(id),
+            public_key: Some(public_key),
+            proof_key: Some(proof_key),
             cards,
             cards_public,
             reveal_tokens,
@@ -97,7 +97,7 @@ pub struct PokerState {
 
     pub community_cards_tokens: Vec<Vec<(RevealToken, Rc<RevealProof>, PublicKey)>>,
 
-    pub players_connected: HashMap<String, PlayerInfo>,
+    pub players_info: HashMap<String, PlayerInfo>,
     pub public_reshuffle_bytes: Vec<(u8, Vec<u8>)>,
     pub proof_reshuffle_bytes: Vec<u8>,
 

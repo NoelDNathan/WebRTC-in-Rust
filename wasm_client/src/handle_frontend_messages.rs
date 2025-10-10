@@ -4,6 +4,7 @@ use wasm_bindgen::JsCast;
 use crate::poker_state::{GamePhase, PokerState};
 use texas_holdem::{InternalPlayer, PublicKey, RevealProof, RevealToken};
 
+use crate::handle_poker_messages::ERROR_PLAYER_ID_NOT_SET;
 use ark_ff::to_bytes;
 use log::{error, info};
 use rand::rngs::StdRng;
@@ -16,7 +17,7 @@ use crate::handle_poker_messages::{
     ERROR_DECK_NOT_SET, ERROR_NAME_BYTES_NOT_SET, ERROR_PLAYER_NOT_SET,
 };
 
-pub fn send_public_key(state: Rc<RefCell<PokerState>>, player_address: String) {
+pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String, player_id:u8){
     let pp = {
         let s_ro = state.borrow();
         s_ro.pp.clone()
@@ -32,9 +33,15 @@ pub fn send_public_key(state: Rc<RefCell<PokerState>>, player_address: String) {
     )
     .expect("Failed to create player");
     s.my_player = Some(player.clone());
+    s.my_id = Some(player_id.to_string());
 
+    
+}
+
+pub fn send_public_key(state: Rc<RefCell<PokerState>>) {
     // 1) enviar public key info
     info!("(Rust) >> Enviando PublicKeyInfo");
+    let mut s = state.borrow_mut();
 
     let player_clone = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET).clone();
 
@@ -57,8 +64,9 @@ pub fn send_public_key(state: Rc<RefCell<PokerState>>, player_address: String) {
             .as_ref()
             .expect(ERROR_NAME_BYTES_NOT_SET)
             .clone(),
-        public_key: serialize_canonical(&player.pk).unwrap(),
-        proof_key: serialize_canonical(&player.proof_key).unwrap(),
+        public_key: serialize_canonical(&player_clone.pk).unwrap(),
+        proof_key: serialize_canonical(&player_clone.proof_key).unwrap(),
+        player_id: s.my_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).parse::<u8>().unwrap(),
     };
     let message = ProtocolMessage::PublicKeyInfo(public_key_info);
     if let Err(e) = send_protocol_message(&mut *s, message) {
@@ -66,10 +74,6 @@ pub fn send_public_key(state: Rc<RefCell<PokerState>>, player_address: String) {
     }
 }
 
-pub fn set_player_id(state: Rc<RefCell<PokerState>>, player_id: String) {
-    let mut s = state.borrow_mut();
-    s.my_id = Some(player_id.to_string());
-}
 
 pub fn change_phase(state: Rc<RefCell<PokerState>>, phase: GamePhase) {
     if phase == GamePhase::Flop {
