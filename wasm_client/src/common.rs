@@ -86,20 +86,36 @@ use crate::poker_state::GamePhase;
 
 #[wasm_bindgen]
 pub fn poker_send_public_key() {
+    info!("poker_send_public_key");
     if let Some(state) = get_poker_state() {
         frontend_msgs::send_public_key(state);
     }
 }
 
 #[wasm_bindgen]
-pub fn poker_create_player(player_address: String, player_id: u8) {
+pub fn poker_create_player(player_address: String) {
+    info!("poker_create_player: {}", player_address);
     if let Some(state) = get_poker_state() {
-        frontend_msgs::create_player(state, player_address, player_id);
+        frontend_msgs::create_player(state, player_address);
+        info!("poker_create_player: done");
+    }else{
+        error!("poker_create_player: no state");
+    }
+}
+
+#[wasm_bindgen]
+pub fn poker_set_player_id(player_id: String) {
+    info!("poker_set_player_id: {}", player_id);
+    if let Some(state) = get_poker_state() {
+        frontend_msgs::set_player_id(state, player_id);
+    }else{
+        error!("poker_set_player_id: no state");
     }
 }
 
 #[wasm_bindgen]
 pub fn poker_change_phase(phase: String) {
+    info!("poker_change_phase: {}", phase);
     if let Some(state) = get_poker_state() {
         let phase_enum = match phase.as_str() {
             "Flop" => GamePhase::Flop,
@@ -111,13 +127,18 @@ pub fn poker_change_phase(phase: String) {
             }
         };
         frontend_msgs::change_phase(state, phase_enum);
+    }else{
+        error!("poker_change_phase: no state");
     }
 }
 
 #[wasm_bindgen]
 pub fn poker_reveal_all_cards() {
+    info!("poker_reveal_all_cards");
     if let Some(state) = get_poker_state() {
         frontend_msgs::reveal_all_cards(state);
+    }else{
+        error!("poker_reveal_all_cards: no state");
     }
 }
 

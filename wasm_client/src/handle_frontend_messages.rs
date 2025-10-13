@@ -17,7 +17,7 @@ use crate::handle_poker_messages::{
     ERROR_DECK_NOT_SET, ERROR_NAME_BYTES_NOT_SET, ERROR_PLAYER_NOT_SET,
 };
 
-pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String, player_id:u8){
+pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String){
     let pp = {
         let s_ro = state.borrow();
         s_ro.pp.clone()
@@ -33,9 +33,26 @@ pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String, pla
     )
     .expect("Failed to create player");
     s.my_player = Some(player.clone());
-    s.my_id = Some(player_id.to_string());
 
+    let public_key = player.pk.to_string();
+    let proof_key = player.proof_key.random_commit.to_string();
+    let opening = player.proof_key.opening.to_string();
+
+    info!("(Rust) >> Verifying public key: {}", public_key);
+    let verify_public_key_clone = s.verify_public_key.clone();
+    let _ = verify_public_key_clone.call3(
+        &JsValue::NULL,
+        &JsValue::from_str(&public_key),
+        &JsValue::from_str(&proof_key),
+        &JsValue::from_str(&opening),
+    );
+    info!("(Rust) >> Public key verified");
     
+}
+
+pub fn set_player_id(state: Rc<RefCell<PokerState>>, player_id: String) {
+    let mut s = state.borrow_mut();
+    s.my_id = Some(player_id.to_string());
 }
 
 pub fn send_public_key(state: Rc<RefCell<PokerState>>) {
@@ -100,10 +117,11 @@ pub fn handle_turn(state: Rc<RefCell<PokerState>>) {
         .compute_reveal_token(&mut rng, &pp, &current_deck[3])
         .expect("Failed to compute reveal token for turn");
 
+    let reveal_token_turn_bytes = serialize_canonical(&reveal_token_turn).expect("Failed to serialize reveal token for turn");
     // Send the reveal token for turn
     let message = ProtocolMessage::RevealTokenCommunityCards(
-        vec![serialize_canonical(&reveal_token_turn.0).unwrap()],
-        serialize_canonical(&reveal_token_turn.1).unwrap(),
+        vec![reveal_token_turn_bytes],
+        vec![3],
     );
 
     if let Err(e) = send_protocol_message(&mut *s, message) {

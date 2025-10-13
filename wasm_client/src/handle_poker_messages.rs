@@ -481,8 +481,8 @@ fn handle_reveal_token_received(
             Some((_, player_info)) => {
                 info!("Received reveal token from player {}", id);
                 info!("Received reveal token from player {}", id);
-                player_info.reveal_tokens[0].push(reveal_token1_rc);
-                player_info.reveal_tokens[1].push(reveal_token2_rc);
+                player_info.reveal_tokens[0].push(reveal_token1_rc.clone());
+                player_info.reveal_tokens[1].push(reveal_token2_rc.clone());
 
                 // the player himself is not counted, only the other players
                 if player_info.reveal_tokens[0].len() == num_players_connected - 1 {
@@ -564,25 +564,25 @@ fn handle_reveal_token_received(
         // Convert Rc<RevealProof> back to RevealProof for the function call
         let mut tokens_for_peek1: Vec<(RevealToken, RevealProof, PublicKey)> = s
             .received_reveal_tokens1
-            .iter()
+            .drain(..)
             .map(|(token, proof_rc, key)| {
                 (
-                    token.clone(),
-                    Rc::try_unwrap(proof_rc.clone())
-                        .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                    key.clone(),
+                    token,
+                    Rc::try_unwrap(proof_rc)
+                    .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    key,
                 )
             })
             .collect();
         let mut tokens_for_peek2: Vec<(RevealToken, RevealProof, PublicKey)> = s
             .received_reveal_tokens2
-            .iter()
+            .drain(..)
             .map(|(token, proof_rc, key)| {
                 (
-                    token.clone(),
-                    Rc::try_unwrap(proof_rc.clone())
-                        .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                    key.clone(),
+                    token,
+                    Rc::try_unwrap(proof_rc)
+                    .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    key,
                 )
             })
             .collect();
@@ -775,7 +775,7 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
     info!("Got zk proof remove and remask chunk");
     s.public_reshuffle_bytes.push((i, chunk));
 
-    if s.public_reshuffle_bytes.len() - 1 == length as usize {
+    if s.public_reshuffle_bytes.len() == length as usize {
         info!("All public reshuffle bytes received");
         s.is_all_public_reshuffle_bytes_received = true;
 
