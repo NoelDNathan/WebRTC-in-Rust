@@ -189,6 +189,7 @@ pub fn init_poker_engine() {
 pub fn register_poker_callbacks(
     verify_public_key: Function,
     verify_shuffling: Function,
+    start_game: Function,
     verify_reveal_token: Function,
     set_private_cards: Function,
     set_community_card: Function,
@@ -197,6 +198,7 @@ pub fn register_poker_callbacks(
         let mut state = poker_state.borrow_mut();
         state.verify_public_key = verify_public_key;
         state.verify_shuffling = verify_shuffling;
+        state.start_game = start_game;
         state.verify_reveal_token = verify_reveal_token;
         state.set_private_cards = set_private_cards;
         state.set_community_card = set_community_card;
@@ -632,6 +634,10 @@ fn create_poker_state() -> PokerState {
 
     let prover_shuffle = CircomProver::new_embedded_shuffle().expect("prover_shuffle failed");
 
+    // let prover_reshuffle = CircomProver::new("reshuffling").expect("prover_reshuffle failed");
+
+    // let prover_shuffle = CircomProver::new("shuffling").expect("prover_shuffle failed");
+
     let provers = Provers {
         prover_reshuffle,
         prover_shuffle,
@@ -663,6 +669,7 @@ fn create_poker_state() -> PokerState {
         is_all_public_reshuffle_bytes_received: false,
         verify_public_key: js_sys::Function::new_no_args(""),
         verify_shuffling: js_sys::Function::new_no_args(""),
+        start_game: js_sys::Function::new_no_args(""),
         verify_reveal_token: js_sys::Function::new_no_args(""),
         set_private_cards: js_sys::Function::new_no_args(""),
         set_community_card: js_sys::Function::new_no_args(""),

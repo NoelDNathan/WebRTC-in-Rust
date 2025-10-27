@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use web_sys::{RtcDataChannel, RtcPeerConnection};
+use web_sys::{Blob, Document, HtmlAnchorElement, RtcDataChannel, RtcPeerConnection, Url, Window};
 use zk_reshuffle::{deserialize_proof, serialize_proof, Proof as ZKProofCardRemoval};
 
 use ark_std::One;
@@ -51,6 +51,37 @@ const NUM_OF_CARDS: usize = M * N;
 const NUM_PLAYERS_EXPECTED: usize = 2;
 
 const DEBUG_MODE: bool = true;
+
+// Función para guardar datos en un archivo y descargarlo
+fn save_to_file(filename: &str, content: &str) -> Result<(), JsValue> {
+    let window = web_sys::window().unwrap();
+    let document = window.document().unwrap();
+
+    // Crear un blob con el contenido
+    let array = js_sys::Array::new();
+    array.push(&JsValue::from_str(content));
+
+    let blob = Blob::new_with_str_sequence(&array)?;
+
+    // Crear una URL para el blob
+    let url = Url::create_object_url_with_blob(&blob)?;
+
+    // Crear un elemento anchor para la descarga
+    let anchor = document.create_element("a")?;
+    let anchor: HtmlAnchorElement = anchor.dyn_into()?;
+    anchor.set_href(&url);
+    anchor.set_download(filename);
+
+    // Agregar al DOM temporalmente y hacer click
+    document.body().unwrap().append_child(&anchor)?;
+    anchor.click();
+
+    // Limpiar
+    document.body().unwrap().remove_child(&anchor)?;
+    Url::revoke_object_url(&url)?;
+
+    Ok(())
+}
 
 use texas_holdem::{
     encode_cards_ext, generate_list_of_cards, open_card, Bn254Fr, Card, CardProtocol,
@@ -568,8 +599,7 @@ fn handle_reveal_token_received(
             .map(|(token, proof_rc, key)| {
                 (
                     token,
-                    Rc::try_unwrap(proof_rc)
-                    .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    Rc::try_unwrap(proof_rc).unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
                     key,
                 )
             })
@@ -580,8 +610,7 @@ fn handle_reveal_token_received(
             .map(|(token, proof_rc, key)| {
                 (
                     token,
-                    Rc::try_unwrap(proof_rc)
-                    .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
+                    Rc::try_unwrap(proof_rc).unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
                     key,
                 )
             })
@@ -619,7 +648,9 @@ fn handle_reveal_token_received(
                 cards_array.set(0, card1_value);
                 cards_array.set(1, card2_value);
 
-                set_private_cards_clone.call1(&JsValue::NULL, &cards_array);
+                if let Err(e) = set_private_cards_clone.call1(&JsValue::NULL, &cards_array) {
+                    error!("set_private_cards callback failed: {:?}", e);
+                }
             }
             (Err(e1), Ok(_)) => error!("Error peeking at card 1: {:?}", e1),
             (Ok(_), Err(e2)) => error!("Error peeking at card 2: {:?}", e2),
@@ -701,11 +732,14 @@ fn handle_reveal_token_community_cards_received(
 
                             let index_value = JsValue::from_str(&format!("{:?}", index));
                             let card_value = JsValue::from_str(&format!("{:?}", card));
-                            set_community_card_clone.call2(
+
+                            if let Err(e) = set_community_card_clone.call2(
                                 &JsValue::NULL,
                                 &index_value,
                                 &card_value,
-                            );
+                            ) {
+                                error!("set_community_card callback failed: {:?}", e);
+                            }
                         }
                         Err(e) => error!("Error opening card: {:?}", e),
                     }
@@ -1034,6 +1068,21 @@ fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
     let joint_pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
     let pp = s.pp.clone();
 
+    let cards_string = list_of_cards
+        .iter()
+        .map(|card| card.0.to_string())
+        .collect::<Vec<String>>();
+    let cards_str = JsValue::from_str(&format!("{:?}", cards_string));
+    let enc_generator_str =
+        JsValue::from_str(&format!("{:?}", s.pp.enc_parameters.generator.to_string()));
+
+    if let Err(e) = s
+        .start_game
+        .call2(&JsValue::NULL, &cards_str, &enc_generator_str)
+    {
+        error!("start_game callback failed: {:?}", e);
+    }
+
     let deck_and_proofs: Vec<(MaskedCard, RemaskingProof)> = list_of_cards
         .iter()
         .map(|card| CardProtocol::mask(&mut rng, &pp, &joint_pk, &card, &Scalar::one()))
@@ -1233,10 +1282,102 @@ fn shuffle_remask_and_send(
                     let public_str = JsValue::from_str(&format!("{:?}", public_clone));
                     let proof_str = JsValue::from_str(&format!("{:?}", (a, b, c)));
 
-                    verify_shuffling_clone.call2(&JsValue::NULL, &public_str, &proof_str);
+                    if let Err(e) =
+                        verify_shuffling_clone.call2(&JsValue::NULL, &public_str, &proof_str)
+                    {
+                        error!("verify_shuffling callback failed: {:?}", e);
+                    }
 
                     if DEBUG_MODE {
                         info!("DEBUG: JavaScript callback sent successfully");
+                    }
+
+                    // Guardar los datos de la proof y public signals para debugging
+                    if DEBUG_MODE {
+                        info!("DEBUG: Saving proof and public data to files...");
+
+                        // Crear contenido detallado para debugging
+                        let debug_content = format!(
+                            "=== SHUFFLING PROOF DEBUG DATA ===\n\
+                            Timestamp: {}\n\n\
+                            === PUBLIC SIGNALS ({} elements) ===\n\
+                            {:?}\n\n\
+                            === PROOF COMPONENTS ===\n\
+                            proofA: ({}, {})\n\
+                            proofB: (({}, {}), ({}, {}))\n\
+                            proofC: ({}, {})\n\n\
+                            === FORMATTED FOR CONTRACT ===\n\
+                            proofA: [{}, {}]\n\
+                            proofB: [[{}, {}], [{}, {}]]\n\
+                            proofC: [{}, {}]\n\n\
+                            === PUBLIC SIGNALS AS STRINGS ===\n\
+                            {:?}\n",
+                            js_sys::Date::new_0()
+                                .to_iso_string()
+                                .as_string()
+                                .unwrap_or_default(),
+                            public_clone.len(),
+                            public_clone,
+                            proof_clone.a.x.to_string(),
+                            proof_clone.a.y.to_string(),
+                            proof_clone.b.x.c0.to_string(),
+                            proof_clone.b.x.c1.to_string(),
+                            proof_clone.b.y.c0.to_string(),
+                            proof_clone.b.y.c1.to_string(),
+                            proof_clone.c.x.to_string(),
+                            proof_clone.c.y.to_string(),
+                            proof_clone.a.x.to_string(),
+                            proof_clone.a.y.to_string(),
+                            proof_clone.b.x.c0.to_string(),
+                            proof_clone.b.x.c1.to_string(),
+                            proof_clone.b.y.c0.to_string(),
+                            proof_clone.b.y.c1.to_string(),
+                            proof_clone.c.x.to_string(),
+                            proof_clone.c.y.to_string(),
+                            public_clone
+                                .iter()
+                                .map(|fr| fr.to_string())
+                                .collect::<Vec<String>>()
+                        );
+
+                        // Guardar archivo de debug
+                        // if let Err(e) = save_to_file("shuffling_debug.txt", &debug_content) {
+                        //     error!("Error saving debug file: {:?}", e);
+                        // } else {
+                        //     info!("DEBUG: Debug file saved successfully");
+                        // }
+
+                        // Guardar solo los public signals en formato JSON
+                        let public_json = serde_json::to_string_pretty(
+                            &public_clone
+                                .iter()
+                                .map(|fr| fr.to_string())
+                                .collect::<Vec<String>>(),
+                        )
+                        .unwrap_or_default();
+
+                        // if let Err(e) = save_to_file("public_signals.json", &public_json) {
+                        //     error!("Error saving public signals file: {:?}", e);
+                        // } else {
+                        //     info!("DEBUG: Public signals file saved successfully");
+                        // }
+
+                        // // Guardar proof en formato JSON
+                        // let proof_json = serde_json::to_string_pretty(&serde_json::json!({
+                        //     "proofA": [proof_clone.a.x.to_string(), proof_clone.a.y.to_string()],
+                        //     "proofB": [
+                        //         [proof_clone.b.x.c0.to_string(), proof_clone.b.x.c1.to_string()],
+                        //         [proof_clone.b.y.c0.to_string(), proof_clone.b.y.c1.to_string()]
+                        //     ],
+                        //     "proofC": [proof_clone.c.x.to_string(), proof_clone.c.y.to_string()]
+                        // }))
+                        // .unwrap_or_default();
+
+                        // if let Err(e) = save_to_file("proof_components.json", &proof_json) {
+                        //     error!("Error saving proof file: {:?}", e);
+                        // } else {
+                        //     info!("DEBUG: Proof file saved successfully");
+                        // }
                     }
 
                     if DEBUG_MODE {
@@ -1495,7 +1636,9 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                     for arg in args {
                         args_array.push(&arg);
                     }
-                    let _ = verify_reveal_token_clone.apply(&JsValue::NULL, &args_array);
+                    if let Err(e) = verify_reveal_token_clone.apply(&JsValue::NULL, &args_array) {
+                        error!("verify_reveal_token callback failed: {:?}", e);
+                    }
 
                     let new_token1 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
                         &reveal_token1_bytes,

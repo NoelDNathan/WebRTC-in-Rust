@@ -2,15 +2,23 @@
 name = "wasm_client"
 version = "0.1.0"
 authors = ["charles"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["console_error_panic_hook"]
+rayon = [
+    "dep:rayon",
+    "dep:wasm-bindgen-rayon"
+]
 
 [dependencies]
+# base64ct = "=1.7.3"
+# ws_stream_wasm = "=0.7.4"
+# ruint = "=1.16.0"
+# hex-literal = "=0.4.1"
 arc-swap = "1.2.0"
 async-std = "1.9.0"
 log = "0.4.11"
@@ -35,6 +43,11 @@ proof-essentials = {path = "../../proof-essentials"}
 zk-reshuffle = {path = "../../workspace-ark05/zk-reshuffle"}
 ark-bn254 = "0.5.0"
 
+rayon = { version = "1.8", optional = true }
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
+getrandom_v2 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_v3 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 texas-holdem = {path = "../../texas-holdem"}
 
@@ -55,6 +68,8 @@ version = "0.3.47"
 features = [  
   "MessageEvent",
   "RtcPeerConnection",
+  "HtmlAnchorElement",
+  "Url",
   "RtcSignalingState",
   "RtcSdpType",
   "RtcSessionDescriptionInit",
@@ -98,4 +113,5 @@ features = [
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.13"
+
 

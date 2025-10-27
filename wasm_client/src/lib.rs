@@ -20,9 +20,15 @@ use sdp::{create_sdp_offer, receive_sdp_answer, receive_sdp_offer_send_answer};
 use utils::set_panic_hook;
 use websockets::open_web_socket;
 
+
+//#[cfg(all(target_arch = "wasm32", not(doc), target_feature = "atomics"))]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+
 #[wasm_bindgen(start)]
 pub async fn start() {
     set_panic_hook();
+
 
     wasm_logger::init(wasm_logger::Config::new(log::Level::Debug));
 

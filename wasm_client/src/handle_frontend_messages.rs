@@ -62,19 +62,6 @@ pub fn send_public_key(state: Rc<RefCell<PokerState>>) {
 
     let player_clone = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET).clone();
 
-    let verify_public_key_clone = s.verify_public_key.clone();
-
-    let r = format!("{:?}", player_clone.proof_key.random_commit.to_string());
-    let s_str = format!("{:?}", player_clone.proof_key.opening.to_string());
-
-    let public_key_value = format!("{:?}", player_clone.pk.to_string());
-    let _ = verify_public_key_clone.call3(
-        &JsValue::NULL,
-        &JsValue::from_str(&public_key_value),
-        &JsValue::from_str(&r),
-        &JsValue::from_str(&s_str),
-    );
-
     let public_key_info = PublicKeyInfoEncoded {
         name: s
             .my_name_bytes
