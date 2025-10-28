@@ -104,6 +104,7 @@ pub enum ProtocolMessage {
     RevealTokenCommunityCards(Vec<Vec<u8>>, Vec<u8>),
     EncodedCards(Vec<u8>),
     PublicKeyInfo(PublicKeyInfoEncoded),
+    // PlayerId(u8),
     ShuffledAndRemaskedCards(Vec<u8>, Vec<u8>),
     RevealAllCards(Vec<Vec<u8>>),
     ZKProofRemoveAndRemaskChunk(u8, u8, Vec<u8>),
@@ -143,6 +144,10 @@ pub fn handle_poker_message(
                     public_key_info,
                 )
             }
+            // ProtocolMessage::PlayerId(player_id) => {
+            //     info!("Received player id: {}", player_id);
+            //     handle_player_id_received(state, peer_connection, player_id);
+            // }
             ProtocolMessage::RevealToken(id, reveal_token1_bytes, reveal_token2_bytes) => {
                 info!("Received reveal token");
                 handle_reveal_token_received(state, id, reveal_token1_bytes, reveal_token2_bytes);
@@ -250,7 +255,9 @@ fn handle_public_key_info_received(
         match CardProtocol::verify_key_ownership(&s.pp, &pk_val, &name.as_bytes(), &proof_val) {
             Ok(_) => {
                 // Update existing player entry instead of inserting a new one
-                let peer_id = get_peer_id(peer_connection.clone());
+                let peer_id = get_peer_id(data_channel.clone());
+                info!("Peer id: {:?}", peer_id);
+                info!("Players info: {:?}", s.players_info);
                 if let Some(player_info) = s.players_info.get_mut(&peer_id) {
                     player_info.name = Some(name.clone());
                     player_info.id = Some(new_player_id);
@@ -295,6 +302,27 @@ fn handle_public_key_info_received(
         }
     }
 }
+
+// fn handle_player_id_received(
+//     state: Rc<RefCell<PokerState>>,
+//     peer_connection: RtcPeerConnection,
+//     player_id: u8,
+// ) {
+//     info!("Setting player id {} for peer", player_id);
+//     let peer_id = get_peer_id(peer_connection);
+
+//     let mut s = state.borrow_mut();
+
+//     if let Some(player_info) = s.players_info.get_mut(&peer_id) {
+//         player_info.id = Some(player_id);
+//         info!("Player id {} set for peer {}", player_id, peer_id);
+//     } else {
+//         warn!(
+//             "Attempted to set player id {} for peer {}, but entry was not found.",
+//             player_id, peer_id
+//         );
+//     }
+// }
 
 fn handle_encoded_cards_received(
     state: Rc<RefCell<PokerState>>,
@@ -917,15 +945,7 @@ pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Re
 
     // Send to all connected players
     for (peer_id, player_info) in &s.players_info {
-        let player_id = player_info
-            .id
-            .as_ref()
-            .expect(ERROR_PLAYERINFO_ID_NOT_SET)
-            .clone();
-        info!(
-            "🎯 Attempting to send to player {} (peer: {})",
-            player_id, peer_id
-        );
+        info!("🎯 Attempting to send to player (peer: {})", peer_id);
         info!(
             "📊 Data channel state: {:?}",
             player_info.data_channel.ready_state()
@@ -933,20 +953,20 @@ pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Re
 
         if player_info.data_channel.ready_state() == web_sys::RtcDataChannelState::Open {
             if let Err(e) = player_info.data_channel.send_with_str(&serialized_message) {
-                error!("❌ Error sending to player {}: {:?}", player_id, e);
-                errors.push(format!("Error sending to player {}: {:?}", player_id, e));
+                error!("❌ Error sending to player {}: {:?}", peer_id, e);
+                errors.push(format!("Error sending to player {}: {:?}", peer_id, e));
             } else {
-                info!("✅ Message sent successfully to player {}", player_id);
+                info!("✅ Message sent successfully to player {}", peer_id);
             }
         } else {
             warn!(
                 "⚠️ DataChannel not open for player {} (state: {:?})",
-                player_id,
+                peer_id,
                 player_info.data_channel.ready_state()
             );
             errors.push(format!(
                 "DataChannel not open for player {} (state: {:?})",
-                player_id,
+                peer_id,
                 player_info.data_channel.ready_state()
             ));
         }
@@ -1044,12 +1064,13 @@ fn deserializar_chunks_a_strings(
     Ok(resultado)
 }
 
-pub fn get_peer_id(peer_connection: RtcPeerConnection) -> String {
-    let mut hasher = DefaultHasher::new();
-    // Use the object's memory address or some unique property
-    std::ptr::addr_of!(peer_connection).hash(&mut hasher);
-    let hash = hasher.finish();
-    format!("peer_{}", hash)
+pub fn get_peer_id(data_channel: RtcDataChannel) -> String {
+    if let Some(id) = data_channel.id() {
+        format!("peer_{}", id)
+    } else {
+        // Fallback al label
+        data_channel.label()
+    }
 }
 
 fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
@@ -1630,13 +1651,16 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                         B_card2,
                         r_card1,
                         r_card2,
+                        receiver_chair,
                     ];
 
                     let args_array = js_sys::Array::new();
                     for arg in args {
                         args_array.push(&arg);
                     }
-                    if let Err(e) = verify_reveal_token_clone.apply(&JsValue::NULL, &args_array) {
+                    info!("args_array: {:?}", args_array);
+                    info!("args array length: {:?}", args_array.length());
+                    if let Err(e) = verify_reveal_token_clone.call1(&JsValue::NULL, &args_array) {
                         error!("verify_reveal_token callback failed: {:?}", e);
                     }
 

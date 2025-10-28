@@ -53,6 +53,11 @@ pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String){
 pub fn set_player_id(state: Rc<RefCell<PokerState>>, player_id: String) {
     let mut s = state.borrow_mut();
     s.my_id = Some(player_id.to_string());
+
+    // let message = ProtocolMessage::PlayerId(player_id.parse::<u8>().unwrap());
+    // if let Err(e) = send_protocol_message(&mut *s, message) {
+    //     error!("Error sending player id: {:?}", e);
+    // }
 }
 
 pub fn send_public_key(state: Rc<RefCell<PokerState>>) {

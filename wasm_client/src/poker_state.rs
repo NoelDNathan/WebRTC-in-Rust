@@ -10,6 +10,8 @@ use std::rc::Rc;
 use web_sys::{RtcDataChannel, RtcPeerConnection};
 use zk_reshuffle::CircomProver;
 
+
+#[derive(Clone)]
 pub struct PlayerInfo {
     pub peer_connection: RtcPeerConnection,
     pub data_channel: RtcDataChannel,
@@ -20,6 +22,23 @@ pub struct PlayerInfo {
     pub cards: [Option<MaskedCard>; 2],
     pub cards_public: [Option<MaskedCard>; 2],
     pub reveal_tokens: [Vec<(RevealToken, Rc<RevealProof>, PublicKey)>; 2],
+}
+
+
+impl std::fmt::Debug for PlayerInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlayerInfo")
+            .field("peer_connection", &"<RtcPeerConnection>")
+            .field("data_channel", &"<RtcDataChannel>")
+            .field("name", &self.name)
+            .field("id", &self.id)
+            .field("public_key", &self.public_key)
+            .field("proof_key", &self.proof_key)
+            .field("cards", &self.cards)
+            .field("cards_public", &self.cards_public)
+            .field("reveal_tokens", &"<Vec<(RevealToken, Rc<RevealProof>, PublicKey)>>")
+            .finish()
+    }
 }
 
 impl PlayerInfo {

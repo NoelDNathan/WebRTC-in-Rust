@@ -477,10 +477,13 @@ fn setup_data_channel_callbacks(
 
     let dc_clone = data_channel.clone();
     let peer_clone = peer_connection.clone();
-
+    info!("Peer id: {:?}", get_peer_id(dc_clone.clone()));
     // Add onopen callback to increment num_players_connected when data channel opens
     let dc_onopen = data_channel.clone();
     let peer_onopen = peer_connection.clone();
+    info!("Peer id onopen: {:?}", get_peer_id(dc_onopen.clone()));
+
+
     let onopen_callback = Closure::wrap(Box::new(move |_event: JsValue| {
         info!("Data channel opened successfully");
         
@@ -489,12 +492,13 @@ fn setup_data_channel_callbacks(
             let mut s = poker_state.borrow_mut();
 
             // Add player to players_connected with basic info
-            let peer_id = get_peer_id(peer_onopen.clone());
+            let peer_id = get_peer_id(dc_onopen.clone());
+            info!("Peer id: {:?}", peer_id);
             let temp_player_info = PlayerInfo {
                 peer_connection: peer_onopen.clone(),
                 data_channel: dc_onopen.clone(),
                 name: None,
-                id: Some(s.players_info.len() as u8),
+                id: None,
                 public_key: None,
                 proof_key: None,
                 cards: [None, None],
@@ -504,6 +508,7 @@ fn setup_data_channel_callbacks(
 
             s.players_info.insert(peer_id, temp_player_info);
             info!("Player connected via data channel. Total players: {}", s.players_info.len());
+            info!("Players info: {:?}", s.players_info);
         }
     }) as Box<dyn FnMut(JsValue)>);
 
