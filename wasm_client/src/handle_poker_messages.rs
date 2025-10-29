@@ -715,6 +715,10 @@ fn handle_reveal_token_community_cards_received(
     info!("Got reveal token community cards");
     // Deserialize each reveal token individually
 
+    // Accumulate all revealed cards to send them all at once
+    let mut revealed_indices = Vec::new();
+    let mut revealed_cards = Vec::new();
+
     for i in 0..reveal_token_bytes.len() {
         let token_bytes = &reveal_token_bytes[i];
         let index = index_bytes[i] as usize;
@@ -755,25 +759,35 @@ fn handle_reveal_token_community_cards_received(
                     match open_card(&pp, &tokens_for_open, &card_mapping, &deck[index]) {
                         Ok(card) => {
                             info!("Community Card{:?}: {:?}", index, card);
-
-                            let set_community_card_clone = s.set_community_card.clone();
-
-                            let index_value = JsValue::from_str(&format!("{:?}", index));
-                            let card_value = JsValue::from_str(&format!("{:?}", card));
-
-                            if let Err(e) = set_community_card_clone.call2(
-                                &JsValue::NULL,
-                                &index_value,
-                                &card_value,
-                            ) {
-                                error!("set_community_card callback failed: {:?}", e);
-                            }
+                            // Accumulate instead of sending immediately
+                            revealed_indices.push(index);
+                            revealed_cards.push(card);
                         }
                         Err(e) => error!("Error opening card: {:?}", e),
                     }
                 }
                 Err(e) => error!("Error computing reveal token: {:?}", e),
             }
+        }
+    }
+
+    // Send all revealed cards at once if any were revealed
+    if !revealed_indices.is_empty() {
+        let set_community_card_clone = s.set_community_card.clone();
+
+        let indices_array = js_sys::Array::new();
+        for &index in &revealed_indices {
+            indices_array.push(&JsValue::from_f64(index as f64));
+        }
+
+        let cards_array = js_sys::Array::new();
+        for card in &revealed_cards {
+            cards_array.push(&JsValue::from_str(&format!("{:?}", card)));
+        }
+
+        if let Err(e) = set_community_card_clone.call2(&JsValue::NULL, &indices_array, &cards_array)
+        {
+            error!("set_community_card callback failed: {:?}", e);
         }
     }
 }
