@@ -121,6 +121,10 @@ pub fn poker_change_phase(phase: String) {
             "Flop" => GamePhase::Flop,
             "Turn" => GamePhase::Turn,
             "River" => GamePhase::River,
+            "AllInPreflop" => GamePhase::AllInPreflop,
+            "AllInFlop" => GamePhase::AllInFlop,
+            "AllInTurn" => GamePhase::AllInTurn,
+            "Showdown" => GamePhase::Showdown,
             other => {
                 log::error!("Invalid phase: {}", other);
                 return;
@@ -192,7 +196,9 @@ pub fn register_poker_callbacks(
     start_game: Function,
     verify_reveal_token: Function,
     set_private_cards: Function,
+    set_other_player_private_cards: Function,
     set_community_card: Function,
+    set_players_scores: Function,
 ) {
     if let Some(poker_state) = get_poker_state() {
         let mut state = poker_state.borrow_mut();
@@ -201,7 +207,9 @@ pub fn register_poker_callbacks(
         state.start_game = start_game;
         state.verify_reveal_token = verify_reveal_token;
         state.set_private_cards = set_private_cards;
+        state.set_other_player_private_cards = set_other_player_private_cards;
         state.set_community_card = set_community_card;
+        state.set_players_scores = set_players_scores;
         info!("Poker callbacks registered");
     }
 }
@@ -503,6 +511,7 @@ fn setup_data_channel_callbacks(
                 proof_key: None,
                 cards: [None, None],
                 cards_public: [None, None],
+                opened_cards: [None, None],
                 reveal_tokens: [vec![], vec![]],
             };
 
@@ -639,6 +648,8 @@ fn create_poker_state() -> PokerState {
 
     let prover_shuffle = CircomProver::new_embedded_shuffle().expect("prover_shuffle failed");
 
+    let prover_calculate_winners = CircomProver::new_embedded_calculate_winners().expect("prover calculate winners failed");
+
     // let prover_reshuffle = CircomProver::new("reshuffling").expect("prover_reshuffle failed");
 
     // let prover_shuffle = CircomProver::new("shuffling").expect("prover_shuffle failed");
@@ -646,6 +657,7 @@ fn create_poker_state() -> PokerState {
     let provers = Provers {
         prover_reshuffle,
         prover_shuffle,
+        prover_calculate_winners,
     };
 
     PokerState {
@@ -678,6 +690,8 @@ fn create_poker_state() -> PokerState {
         verify_reveal_token: js_sys::Function::new_no_args(""),
         set_private_cards: js_sys::Function::new_no_args(""),
         set_community_card: js_sys::Function::new_no_args(""),
+        set_players_scores: js_sys::Function::new_no_args(""),
+        set_other_player_private_cards: js_sys::Function::new_no_args(""),
         public_shuffle_bytes: Vec::new(),
         proof_shuffle_bytes: Vec::new(),
         is_all_public_shuffle_bytes_received: false,

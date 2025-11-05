@@ -84,9 +84,9 @@ fn save_to_file(filename: &str, content: &str) -> Result<(), JsValue> {
 }
 
 use texas_holdem::{
-    encode_cards_ext, generate_list_of_cards, open_card, Bn254Fr, Card, CardProtocol,
-    InternalPlayer, MaskedCard, ProofKeyOwnership, PublicKey, RemaskingProof, RevealProof,
-    RevealToken, Scalar, ZKProofShuffle,
+    encode_cards_ext, generate_list_of_cards, open_card, Bn254Fr, Card, CardParameters,
+    CardProtocol, ClassicPlayingCard, InternalPlayer, MaskedCard, ProofKeyOwnership, PublicKey,
+    RemaskingProof, RevealProof, RevealToken, Scalar, ZKProofShuffle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -226,80 +226,98 @@ fn handle_public_key_info_received(
         s.pp.clone()
     };
 
-    let mut s = state.borrow_mut();
+    // First, collect all the data we need and update the state
+    let (is_dealer_check, should_deal_cards) = {
+        let mut s = state.borrow_mut();
 
-    match deserialize_canonical::<PublicKey>(&public_key_info.public_key) {
-        Ok(decoded_pk) => pk = Some(decoded_pk),
-        Err(e) => error!("Error deserializing public key: {:?}", e),
-    }
-
-    match deserialize_canonical::<ProofKeyOwnership>(&public_key_info.proof_key) {
-        Ok(decoded_proof) => proof_key = Some(decoded_proof),
-        Err(e) => error!("Error deserializing proof key: {:?}", e),
-    }
-
-    match String::from_utf8(public_key_info.name.clone()) {
-        Ok(decoded_name) => name = decoded_name,
-        Err(e) => error!("Error deserializing name: {:?}", e),
-    }
-
-    if let (Some(pk_val), Some(proof_val)) = (pk, proof_key) {
-        s.num_players_connected += 1;
-        let name_bytes = to_bytes![name.as_bytes()].unwrap();
-        s.pk_proof_info_array.push((pk_val, proof_val, name_bytes));
-
-        let new_player_id = public_key_info.player_id;
-
-        info!("Number of players: {:?}", s.num_players_connected);
-
-        match CardProtocol::verify_key_ownership(&s.pp, &pk_val, &name.as_bytes(), &proof_val) {
-            Ok(_) => {
-                // Update existing player entry instead of inserting a new one
-                let peer_id = get_peer_id(data_channel.clone());
-                info!("Peer id: {:?}", peer_id);
-                info!("Players info: {:?}", s.players_info);
-                if let Some(player_info) = s.players_info.get_mut(&peer_id) {
-                    player_info.name = Some(name.clone());
-                    player_info.id = Some(new_player_id);
-                    player_info.public_key = Some(pk_val.clone());
-                    player_info.proof_key = Some(proof_val.clone());
-                } else {
-                    warn!(
-                        "Attempted to update player {}, but entry was not found. Skipping update.",
-                        peer_id
-                    );
-                }
-            }
-            Err(e) => error!("Error verifying proof key ownership: {:?}", e),
+        match deserialize_canonical::<PublicKey>(&public_key_info.public_key) {
+            Ok(decoded_pk) => pk = Some(decoded_pk),
+            Err(e) => error!("Error deserializing public key: {:?}", e),
         }
 
-        if s.num_players_connected == NUM_PLAYERS_EXPECTED {
-            let current_dealer = s.current_dealer;
-            let player_id = s.my_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).clone();
-            let (player_pk, player_proof_key, player_name) = {
-                let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
-                (
-                    player.pk.clone(),
-                    player.proof_key.clone(),
-                    player.name.clone(),
-                )
-            };
-            s.pk_proof_info_array
-                .push((player_pk, player_proof_key, player_name));
+        match deserialize_canonical::<ProofKeyOwnership>(&public_key_info.proof_key) {
+            Ok(decoded_proof) => proof_key = Some(decoded_proof),
+            Err(e) => error!("Error deserializing proof key: {:?}", e),
+        }
 
-            match CardProtocol::compute_aggregate_key(&pp, &s.pk_proof_info_array) {
-                Ok(aggregate_key) => {
-                    s.joint_pk = Some(aggregate_key);
-                    info!("Joint public key: {:?}", aggregate_key.to_string());
+        match String::from_utf8(public_key_info.name.clone()) {
+            Ok(decoded_name) => name = decoded_name,
+            Err(e) => error!("Error deserializing name: {:?}", e),
+        }
 
-                    if is_dealer(current_dealer, &player_id) {
-                        info!("All players connected, starting game");
-                        dealt_cards(&mut *s);
+        if let (Some(pk_val), Some(proof_val)) = (pk, proof_key) {
+            s.num_players_connected += 1;
+            let name_bytes = to_bytes![name.as_bytes()].unwrap();
+            s.pk_proof_info_array.push((pk_val, proof_val, name_bytes));
+
+            let new_player_id = public_key_info.player_id;
+
+            info!("Number of players: {:?}", s.num_players_connected);
+
+            match CardProtocol::verify_key_ownership(&s.pp, &pk_val, &name.as_bytes(), &proof_val) {
+                Ok(_) => {
+                    // Update existing player entry instead of inserting a new one
+                    let peer_id = get_peer_id(data_channel.clone());
+                    info!("Peer id: {:?}", peer_id);
+                    info!("Players info: {:?}", s.players_info);
+                    if let Some(player_info) = s.players_info.get_mut(&peer_id) {
+                        player_info.name = Some(name.clone());
+                        player_info.id = Some(new_player_id);
+                        player_info.public_key = Some(pk_val.clone());
+                        player_info.proof_key = Some(proof_val.clone());
+                    } else {
+                        warn!(
+                            "Attempted to update player {}, but entry was not found. Skipping update.",
+                            peer_id
+                        );
                     }
                 }
-                Err(e) => error!("Error computing aggregate key: {:?}", e),
+                Err(e) => error!("Error verifying proof key ownership: {:?}", e),
             }
+
+            if s.num_players_connected == NUM_PLAYERS_EXPECTED {
+                let current_dealer = s.current_dealer;
+                let player_id = s.my_id.as_ref().expect(ERROR_PLAYER_ID_NOT_SET).clone();
+                let (player_pk, player_proof_key, player_name) = {
+                    let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
+                    (
+                        player.pk.clone(),
+                        player.proof_key.clone(),
+                        player.name.clone(),
+                    )
+                };
+                s.pk_proof_info_array
+                    .push((player_pk, player_proof_key, player_name));
+
+                match CardProtocol::compute_aggregate_key(&pp, &s.pk_proof_info_array) {
+                    Ok(aggregate_key) => {
+                        s.joint_pk = Some(aggregate_key);
+                        info!("Joint public key: {:?}", aggregate_key.to_string());
+
+                        // Return info needed for dealt_cards, but release borrow first
+                        (is_dealer(current_dealer, &player_id), true)
+                    }
+                    Err(e) => {
+                        error!("Error computing aggregate key: {:?}", e);
+                        (false, false)
+                    }
+                }
+            } else {
+                (false, false)
+            }
+        } else {
+            (false, false)
         }
+    }; // Borrow is released here
+
+    // Now we can safely call dealt_cards without holding a borrow
+    // This allows any incoming messages from dealt_cards to be processed
+    if should_deal_cards && is_dealer_check {
+        info!("All players connected, starting game");
+        // Take a new borrow just for dealt_cards
+        let mut s = state.borrow_mut();
+        dealt_cards(&mut *s);
+        // Borrow is released here
     }
 }
 
@@ -543,24 +561,31 @@ fn handle_reveal_token_received(
                 player_info.reveal_tokens[0].push(reveal_token1_rc.clone());
                 player_info.reveal_tokens[1].push(reveal_token2_rc.clone());
 
-                // the player himself is not counted, only the other players
-                if player_info.reveal_tokens[0].len() == num_players_connected - 1 {
-                    info!("All tokens received for player {}", id);
+                let card1 = player_info.cards[0];
+                let card2 = player_info.cards[1];
 
-                    let card1 = player_info.cards[0];
-                    let card2 = player_info.cards[1];
-                    if let (Some(card1), Some(card2)) = (card1, card2) {
+                if let (Some(card1), Some(card2)) = (card1, card2) {
+                    // When we have tokens from all other players (N-1), reveal partially for reshuffle
+                    if player_info.reveal_tokens[0].len() == num_players_connected - 1 {
+                        info!("All tokens from other players received for player {}, revealing for reshuffle", id);
+
                         // Convert Rc<RevealProof> back to RevealProof for the function call
+                        // Since RevealProof doesn't implement Clone, we use serialization/deserialization
                         let tokens_for_unmask: Vec<(RevealToken, RevealProof, PublicKey)> =
                             player_info.reveal_tokens[0]
                                 .iter()
                                 .map(|(token, proof_rc, key)| {
-                                    (
-                                        token.clone(),
-                                        Rc::try_unwrap(proof_rc.clone())
-                                            .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                                        key.clone(),
-                                    )
+                                    let mut serialized = Vec::new();
+                                    proof_rc
+                                        .serialize(&mut serialized)
+                                        .map_err(|e| format!("Failed to serialize proof: {:?}", e))
+                                        .unwrap();
+                                    let proof = RevealProof::deserialize(&serialized[..])
+                                        .map_err(|e| {
+                                            format!("Failed to deserialize proof: {:?}", e)
+                                        })
+                                        .unwrap();
+                                    (token.clone(), proof, key.clone())
                                 })
                                 .collect();
                         match CardProtocol::partial_unmask(&pp, &tokens_for_unmask, &card1) {
@@ -569,21 +594,95 @@ fn handle_reveal_token_received(
                         }
 
                         // Convert Rc<RevealProof> back to RevealProof for the function call
+                        // Since RevealProof doesn't implement Clone, we use serialization/deserialization
                         let tokens_for_unmask2: Vec<(RevealToken, RevealProof, PublicKey)> =
                             player_info.reveal_tokens[1]
                                 .iter()
                                 .map(|(token, proof_rc, key)| {
-                                    (
-                                        token.clone(),
-                                        Rc::try_unwrap(proof_rc.clone())
-                                            .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                                        key.clone(),
-                                    )
+                                    let mut serialized = Vec::new();
+                                    proof_rc
+                                        .serialize(&mut serialized)
+                                        .map_err(|e| format!("Failed to serialize proof: {:?}", e))
+                                        .unwrap();
+                                    let proof = RevealProof::deserialize(&serialized[..])
+                                        .map_err(|e| {
+                                            format!("Failed to deserialize proof: {:?}", e)
+                                        })
+                                        .unwrap();
+                                    (token.clone(), proof, key.clone())
                                 })
                                 .collect();
                         match CardProtocol::partial_unmask(&pp, &tokens_for_unmask2, &card2) {
                             Ok(opened_card2) => player_info.cards_public[1] = Some(opened_card2),
                             Err(e) => error!("Error al revelar la carta 2: {:?}", e),
+                        }
+                    }
+
+                    // When we have tokens from all players including the player themselves (N), fully reveal
+                    if player_info.reveal_tokens[0].len() == num_players_connected {
+                        info!("All tokens received for player {} (including their own), fully revealing", id);
+
+                        match fully_reveal_card(
+                            &pp,
+                            &player_info.reveal_tokens[0],
+                            &card_mapping,
+                            &card1,
+                        ) {
+                            Ok(opened_card1) => {
+                                player_info.opened_cards[0] = Some(opened_card1);
+                                info!(
+                                    "Card 1 fully revealed for player {}: {:?}",
+                                    id, opened_card1
+                                );
+                            }
+                            Err(e) => {
+                                error!("Error fully revealing card 1 for player {}: {:?}", id, e)
+                            }
+                        }
+
+                        match fully_reveal_card(
+                            &pp,
+                            &player_info.reveal_tokens[1],
+                            &card_mapping,
+                            &card2,
+                        ) {
+                            Ok(opened_card2) => {
+                                player_info.opened_cards[1] = Some(opened_card2);
+                                info!(
+                                    "Card 2 fully revealed for player {}: {:?}",
+                                    id, opened_card2
+                                );
+                            }
+                            Err(e) => {
+                                error!("Error fully revealing card 2 for player {}: {:?}", id, e)
+                            }
+                        }
+
+                        // If both opened cards are set, notify the frontend with (player index, cards)
+                        if let (Some(c1), Some(c2)) =
+                            (player_info.opened_cards[0], player_info.opened_cards[1])
+                        {
+                            let set_other_player_private_cards =
+                                s.set_other_player_private_cards.clone();
+
+                            let cards_array = js_sys::Array::new();
+                            let card1_value = JsValue::from_str(&format!("{:?}", c1));
+                            let card2_value = JsValue::from_str(&format!("{:?}", c2));
+                            cards_array.set(0, card1_value);
+                            cards_array.set(1, card2_value);
+
+                            let player_index = JsValue::from_f64(id as f64);
+
+                            if let Err(e) = set_other_player_private_cards.call2(
+                                &JsValue::NULL,
+                                &player_index,
+                                &cards_array,
+                            ) {
+                                error!(
+                                    "set_other_player_private_cards callback failed for player {}: {:?}",
+                                    id, e
+                                );
+                            }
                         }
                     }
                 }
@@ -621,26 +720,35 @@ fn handle_reveal_token_received(
         let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
 
         // Convert Rc<RevealProof> back to RevealProof for the function call
+        // Since RevealProof doesn't implement Clone, we use serialization/deserialization
         let mut tokens_for_peek1: Vec<(RevealToken, RevealProof, PublicKey)> = s
             .received_reveal_tokens1
             .drain(..)
             .map(|(token, proof_rc, key)| {
-                (
-                    token,
-                    Rc::try_unwrap(proof_rc).unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                    key,
-                )
+                let mut serialized = Vec::new();
+                proof_rc
+                    .serialize(&mut serialized)
+                    .map_err(|e| format!("Failed to serialize proof: {:?}", e))
+                    .unwrap();
+                let proof = RevealProof::deserialize(&serialized[..])
+                    .map_err(|e| format!("Failed to deserialize proof: {:?}", e))
+                    .unwrap();
+                (token, proof, key)
             })
             .collect();
         let mut tokens_for_peek2: Vec<(RevealToken, RevealProof, PublicKey)> = s
             .received_reveal_tokens2
             .drain(..)
             .map(|(token, proof_rc, key)| {
-                (
-                    token,
-                    Rc::try_unwrap(proof_rc).unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                    key,
-                )
+                let mut serialized = Vec::new();
+                proof_rc
+                    .serialize(&mut serialized)
+                    .map_err(|e| format!("Failed to serialize proof: {:?}", e))
+                    .unwrap();
+                let proof = RevealProof::deserialize(&serialized[..])
+                    .map_err(|e| format!("Failed to deserialize proof: {:?}", e))
+                    .unwrap();
+                (token, proof, key)
             })
             .collect();
 
@@ -824,15 +932,19 @@ fn handle_reveal_all_cards_received(
         let player_token_rc = (player_token.0, Rc::new(player_token.1), player_token.2);
         let tokens = vec![reveal_token_rc, player_token_rc];
         // Convert Rc<RevealProof> back to RevealProof for the function call
+        // Since RevealProof doesn't implement Clone, we use serialization/deserialization
         let tokens_for_open: Vec<(RevealToken, RevealProof, PublicKey)> = tokens
             .iter()
             .map(|(token, proof_rc, key)| {
-                (
-                    token.clone(),
-                    Rc::try_unwrap(proof_rc.clone())
-                        .unwrap_or_else(|_| panic!("Failed to unwrap Rc")),
-                    key.clone(),
-                )
+                let mut serialized = Vec::new();
+                proof_rc
+                    .serialize(&mut serialized)
+                    .map_err(|e| format!("Failed to serialize proof: {:?}", e))
+                    .unwrap();
+                let proof = RevealProof::deserialize(&serialized[..])
+                    .map_err(|e| format!("Failed to deserialize proof: {:?}", e))
+                    .unwrap();
+                (token.clone(), proof, key.clone())
             })
             .collect();
         let card = open_card(&pp, &tokens_for_open, &card_mapping, &deck[i as usize])?;
@@ -944,6 +1056,49 @@ fn handle_zk_proof_shuffle_proof_received(state: Rc<RefCell<PokerState>>, proof_
 }
 
 // -----------------------------HELPER FUNCTIONS-----------------------------
+
+/// Helper function to fully reveal a card using all tokens (including the player's own token)
+fn fully_reveal_card(
+    pp: &CardParameters,
+    tokens: &[(RevealToken, Rc<RevealProof>, PublicKey)],
+    card_mapping: &HashMap<Card, ClassicPlayingCard>,
+    masked_card: &MaskedCard,
+) -> Result<ClassicPlayingCard, Box<dyn std::error::Error>> {
+    use std::error::Error as StdError;
+
+    // Convert Rc<RevealProof> back to RevealProof for the function call
+    // Since RevealProof doesn't implement Clone, we use serialization/deserialization
+    let tokens_for_unmask: Vec<(RevealToken, RevealProof, PublicKey)> = tokens
+        .iter()
+        .map(|(token, proof_rc, key)| {
+            let mut serialized = Vec::new();
+            proof_rc
+                .serialize(&mut serialized)
+                .map_err(|e| format!("Failed to serialize proof: {:?}", e))
+                .unwrap();
+            let proof = RevealProof::deserialize(&serialized[..])
+                .map_err(|e| format!("Failed to deserialize proof: {:?}", e))
+                .unwrap();
+            (token.clone(), proof, key.clone())
+        })
+        .collect();
+
+    // Unmask to obtain the plaintext card, then map to ClassicPlayingCard
+    let unmasked_card = CardProtocol::unmask(pp, &tokens_for_unmask, masked_card).map_err(|e| {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to unmask card: {:?}", e),
+        )) as Box<dyn StdError>
+    })?;
+
+    match card_mapping.get(&unmasked_card) {
+        Some(opened) => Ok(*opened),
+        None => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Unmasked card not found in mapping",
+        )) as Box<dyn StdError>),
+    }
+}
 
 pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Result<(), JsValue> {
     // Serialize the message

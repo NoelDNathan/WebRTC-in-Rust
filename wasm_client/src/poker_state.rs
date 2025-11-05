@@ -21,6 +21,7 @@ pub struct PlayerInfo {
     pub proof_key: Option<ProofKeyOwnership>,
     pub cards: [Option<MaskedCard>; 2],
     pub cards_public: [Option<MaskedCard>; 2],
+    pub opened_cards: [Option<ClassicPlayingCard>; 2],
     pub reveal_tokens: [Vec<(RevealToken, Rc<RevealProof>, PublicKey)>; 2],
 }
 
@@ -51,6 +52,7 @@ impl PlayerInfo {
         proof_key: ProofKeyOwnership,
         cards: [Option<MaskedCard>; 2],
         cards_public: [Option<MaskedCard>; 2],
+        opened_cards: [Option<ClassicPlayingCard>; 2],
         reveal_tokens: [Vec<(RevealToken, Rc<RevealProof>, PublicKey)>; 2],
     ) -> Self {
         Self {
@@ -62,6 +64,7 @@ impl PlayerInfo {
             proof_key: Some(proof_key),
             cards,
             cards_public,
+            opened_cards,
             reveal_tokens,
         }
     }
@@ -70,6 +73,7 @@ impl PlayerInfo {
 pub struct Provers {
     pub prover_reshuffle: CircomProver,
     pub prover_shuffle: CircomProver,
+    pub prover_calculate_winners: CircomProver,
 }
 
 // // Initialize two provers: one for reshuffle, one for shuffle
@@ -130,6 +134,8 @@ pub struct PokerState {
     pub verify_reveal_token: js_sys::Function,
     pub set_private_cards: js_sys::Function,
     pub set_community_card: js_sys::Function,
+    pub set_players_scores: js_sys::Function,
+    pub set_other_player_private_cards: js_sys::Function,
 
     pub public_shuffle_bytes: Vec<(u8, Vec<u8>)>,
     pub proof_shuffle_bytes: Vec<u8>,
@@ -143,4 +149,7 @@ pub enum GamePhase {
     Turn,
     River,
     Showdown,
+    AllInPreflop,
+    AllInFlop,
+    AllInTurn,
 }
