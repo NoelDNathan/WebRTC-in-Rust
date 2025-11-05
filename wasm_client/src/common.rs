@@ -17,6 +17,7 @@ use texas_holdem::{generator, CardProtocol};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{JsCast, JsValue, UnwrapThrowExt};
+use wasm_bindgen_futures;
 use web_sys::{
     MediaStream, MediaStreamConstraints, MessageEvent, RtcConfiguration, RtcDataChannel,
     RtcDataChannelEvent, RtcIceConnectionState, RtcIceCredentialType, RtcIceServer,
@@ -98,7 +99,7 @@ pub fn poker_create_player(player_address: String) {
     if let Some(state) = get_poker_state() {
         frontend_msgs::create_player(state, player_address);
         info!("poker_create_player: done");
-    }else{
+    } else {
         error!("poker_create_player: no state");
     }
 }
@@ -108,7 +109,7 @@ pub fn poker_set_player_id(player_id: String) {
     info!("poker_set_player_id: {}", player_id);
     if let Some(state) = get_poker_state() {
         frontend_msgs::set_player_id(state, player_id);
-    }else{
+    } else {
         error!("poker_set_player_id: no state");
     }
 }
@@ -131,7 +132,7 @@ pub fn poker_change_phase(phase: String) {
             }
         };
         frontend_msgs::change_phase(state, phase_enum);
-    }else{
+    } else {
         error!("poker_change_phase: no state");
     }
 }
@@ -141,7 +142,7 @@ pub fn poker_reveal_all_cards() {
     info!("poker_reveal_all_cards");
     if let Some(state) = get_poker_state() {
         frontend_msgs::reveal_all_cards(state);
-    }else{
+    } else {
         error!("poker_reveal_all_cards: no state");
     }
 }
@@ -491,10 +492,9 @@ fn setup_data_channel_callbacks(
     let peer_onopen = peer_connection.clone();
     info!("Peer id onopen: {:?}", get_peer_id(dc_onopen.clone()));
 
-
     let onopen_callback = Closure::wrap(Box::new(move |_event: JsValue| {
         info!("Data channel opened successfully");
-        
+
         // Increment num_players_connected when data channel opens
         if let Some(poker_state) = get_poker_state() {
             let mut s = poker_state.borrow_mut();
@@ -516,7 +516,10 @@ fn setup_data_channel_callbacks(
             };
 
             s.players_info.insert(peer_id, temp_player_info);
-            info!("Player connected via data channel. Total players: {}", s.players_info.len());
+            info!(
+                "Player connected via data channel. Total players: {}",
+                s.players_info.len()
+            );
             info!("Players info: {:?}", s.players_info);
         }
     }) as Box<dyn FnMut(JsValue)>);
@@ -524,15 +527,32 @@ fn setup_data_channel_callbacks(
     data_channel.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
     onopen_callback.forget();
 
+    // Wrap in Rc so we can clone references without moving
+    let dc_clone_rc = Rc::new(dc_clone);
+    let peer_clone_rc = Rc::new(peer_clone);
+
     let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
         info!("📨 Data channel message received");
         info!("📊 Message data type: {:?}", ev.data());
         info!("📝 Message content: {:?}", ev.data().as_string());
 
         if let Some(message) = ev.data().as_string() {
-            info!("🔄 Processing poker protocol message...");
+            info!("🔄 Queuing poker protocol message for async processing...");
             if let Some(poker_state) = get_poker_state() {
-                handle_poker_message(message, poker_state, dc_clone.clone(), peer_clone.clone());
+                // Clone the Rc references (cheap clone, doesn't move)
+                let dc_clone_for_task = dc_clone_rc.clone();
+                let peer_clone_for_task = peer_clone_rc.clone();
+
+                // Move heavy processing to async task to avoid blocking the message handler
+                // This prevents "[Violation] 'message' handler took Xms" warnings
+                wasm_bindgen_futures::spawn_local(async move {
+                    handle_poker_message(
+                        message,
+                        poker_state,
+                        (*dc_clone_for_task).clone(),
+                        (*peer_clone_for_task).clone(),
+                    );
+                });
             } else {
                 error!("❌ Poker state not available for message processing");
             }
@@ -648,7 +668,8 @@ fn create_poker_state() -> PokerState {
 
     let prover_shuffle = CircomProver::new_embedded_shuffle().expect("prover_shuffle failed");
 
-    let prover_calculate_winners = CircomProver::new_embedded_calculate_winners().expect("prover calculate winners failed");
+    let prover_calculate_winners =
+        CircomProver::new_embedded_calculate_winners().expect("prover calculate winners failed");
 
     // let prover_reshuffle = CircomProver::new("reshuffling").expect("prover_reshuffle failed");
 
@@ -856,7 +877,6 @@ pub async fn handle_message_reply(
             notify_session_error(&format!("Could not join session: {}", session_id.inner()));
         }
         SignalEnum::SessionJoin(session_id) => {
-
             // Create SDP offer and send it to establish WebRTC connection
             let peer_conn = peer_connection.clone();
             let ws = websocket.clone();

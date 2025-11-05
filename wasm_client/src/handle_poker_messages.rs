@@ -622,66 +622,56 @@ fn handle_reveal_token_received(
                     if player_info.reveal_tokens[0].len() == num_players_connected {
                         info!("All tokens received for player {} (including their own), fully revealing", id);
 
-                        match fully_reveal_card(
+                        match fully_reveal_both_cards(
                             &pp,
                             &player_info.reveal_tokens[0],
-                            &card_mapping,
-                            &card1,
-                        ) {
-                            Ok(opened_card1) => {
-                                player_info.opened_cards[0] = Some(opened_card1);
-                                info!(
-                                    "Card 1 fully revealed for player {}: {:?}",
-                                    id, opened_card1
-                                );
-                            }
-                            Err(e) => {
-                                error!("Error fully revealing card 1 for player {}: {:?}", id, e)
-                            }
-                        }
-
-                        match fully_reveal_card(
-                            &pp,
                             &player_info.reveal_tokens[1],
                             &card_mapping,
+                            &card1,
                             &card2,
                         ) {
-                            Ok(opened_card2) => {
+                            Ok((opened_card1, opened_card2)) => {
+                                // Both cards successfully revealed - update state
+                                player_info.opened_cards[0] = Some(opened_card1);
                                 player_info.opened_cards[1] = Some(opened_card2);
+
                                 info!(
-                                    "Card 2 fully revealed for player {}: {:?}",
-                                    id, opened_card2
+                                    "Both cards fully revealed for player {}: {:?} and {:?}",
+                                    id, player_info.opened_cards[0], player_info.opened_cards[1]
                                 );
+
+                                // Notify the frontend with (player index, cards)
+                                let set_other_player_private_cards =
+                                    s.set_other_player_private_cards.clone();
+
+                                let cards_array = js_sys::Array::new();
+                                let card1_value = JsValue::from_str(&format!("{:?}", opened_card1));
+                                let card2_value = JsValue::from_str(&format!("{:?}", opened_card2));
+                                cards_array.set(0, card1_value);
+                                cards_array.set(1, card2_value);
+
+                                let player_index = JsValue::from_f64(id as f64);
+
+                                if let Err(e) = set_other_player_private_cards.call2(
+                                    &JsValue::NULL,
+                                    &player_index,
+                                    &cards_array,
+                                ) {
+                                    error!(
+                                        "set_other_player_private_cards callback failed for player {}: {:?}",
+                                        id, e
+                                    );
+                                } else {
+                                    info!("Successfully sent cards to frontend for player {}", id);
+                                }
                             }
                             Err(e) => {
-                                error!("Error fully revealing card 2 for player {}: {:?}", id, e)
-                            }
-                        }
-
-                        // If both opened cards are set, notify the frontend with (player index, cards)
-                        if let (Some(c1), Some(c2)) =
-                            (player_info.opened_cards[0], player_info.opened_cards[1])
-                        {
-                            let set_other_player_private_cards =
-                                s.set_other_player_private_cards.clone();
-
-                            let cards_array = js_sys::Array::new();
-                            let card1_value = JsValue::from_str(&format!("{:?}", c1));
-                            let card2_value = JsValue::from_str(&format!("{:?}", c2));
-                            cards_array.set(0, card1_value);
-                            cards_array.set(1, card2_value);
-
-                            let player_index = JsValue::from_f64(id as f64);
-
-                            if let Err(e) = set_other_player_private_cards.call2(
-                                &JsValue::NULL,
-                                &player_index,
-                                &cards_array,
-                            ) {
                                 error!(
-                                    "set_other_player_private_cards callback failed for player {}: {:?}",
+                                    "Error fully revealing both cards for player {}: {:?}",
                                     id, e
                                 );
+                                error!("Card 1 state: {:?}", player_info.opened_cards[0]);
+                                error!("Card 2 state: {:?}", player_info.opened_cards[1]);
                             }
                         }
                     }
@@ -1098,6 +1088,21 @@ fn fully_reveal_card(
             "Unmasked card not found in mapping",
         )) as Box<dyn StdError>),
     }
+}
+
+/// Reveal both cards for a player and return them together.
+/// This ensures both cards are revealed atomically or not at all.
+fn fully_reveal_both_cards(
+    pp: &CardParameters,
+    tokens1: &[(RevealToken, Rc<RevealProof>, PublicKey)],
+    tokens2: &[(RevealToken, Rc<RevealProof>, PublicKey)],
+    card_mapping: &HashMap<Card, ClassicPlayingCard>,
+    masked_card1: &MaskedCard,
+    masked_card2: &MaskedCard,
+) -> Result<(ClassicPlayingCard, ClassicPlayingCard), Box<dyn std::error::Error>> {
+    let card1 = fully_reveal_card(pp, tokens1, card_mapping, masked_card1)?;
+    let card2 = fully_reveal_card(pp, tokens2, card_mapping, masked_card2)?;
+    Ok((card1, card2))
 }
 
 pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Result<(), JsValue> {
