@@ -681,6 +681,10 @@ fn handle_reveal_token_received(
                 error!("Error: Player with id not found {}", id)
             }
         }
+
+        // Check if all cards are revealed and calculate scores (after updating state)
+        drop(s); // Release the borrow before calling check_and_calculate_scores
+        check_and_calculate_scores(state);
         return;
     }
 
@@ -777,6 +781,9 @@ fn handle_reveal_token_received(
                 if let Err(e) = set_private_cards_clone.call1(&JsValue::NULL, &cards_array) {
                     error!("set_private_cards callback failed: {:?}", e);
                 }
+
+                s.my_revealed_cards[0] = Some(card1);
+                s.my_revealed_cards[1] = Some(card2);
             }
             (Err(e1), Ok(_)) => error!("Error peeking at card 1: {:?}", e1),
             (Ok(_), Err(e2)) => error!("Error peeking at card 2: {:?}", e2),
@@ -788,6 +795,198 @@ fn handle_reveal_token_received(
         // Restore the player after all operations are complete
         s.my_player = Some(player);
     }
+    drop(s); // Release the borrow before calling check_and_calculate_scores
+             // Check if all cards are revealed and calculate scores (outside the borrow)
+    check_and_calculate_scores(state);
+}
+
+/// Helper function to convert ClassicPlayingCard to numeric value for circuit
+/// Encoding: suit_index * 13 + value_index
+/// Suit: Club=0, Diamond=1, Heart=2, Spade=3
+/// Value: Two=2, Three=3, ..., King=13, Ace=14
+fn card_to_numeric(card: &ClassicPlayingCard) -> u8 {
+    let card_str = format!("{:?}", card);
+
+    let suit_value = match card_str.chars().last() {
+        Some('♣') => 0, // Club
+        Some('♦') => 1, // Diamond
+        Some('♥') => 2, // Heart
+        Some('♠') => 3, // Spade
+        _ => 0,
+    };
+
+    let value_str = card_str.trim_end_matches(|c| c == '♣' || c == '♦' || c == '♥' || c == '♠');
+
+    let card_value = match value_str {
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        "6" => 6,
+        "7" => 7,
+        "8" => 8,
+        "9" => 9,
+        "10" => 10,
+        "J" => 11, // Jack
+        "Q" => 12, // Queen
+        "K" => 13, // King
+        "A" => 14, // Ace
+        _ => 0,
+    };
+
+    suit_value * 13 + card_value
+}
+
+/// Check if all players' cards and community cards are fully revealed
+fn are_all_cards_revealed(state: &PokerState) -> bool {
+    // Check my player's cards
+    if state.my_revealed_cards[0].is_none() || state.my_revealed_cards[1].is_none() {
+        return false;
+    }
+
+    // Check all community cards (need all 5)
+    for i in 0..5 {
+        if state.revealed_community_cards[i].is_none() {
+            return false;
+        }
+    }
+
+    // Check all other players' cards
+    for (_, player_info) in state.players_info.iter() {
+        if player_info.opened_cards[0].is_none() || player_info.opened_cards[1].is_none() {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Calculate player scores using the ZK circuit and send to frontend
+fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
+    let mut s = state.borrow_mut();
+
+    let num_players = s.num_players_connected;
+
+    // Collect all players' cards in order (by player ID)
+    let mut all_players_cards: Vec<(u8, Option<ClassicPlayingCard>, Option<ClassicPlayingCard>)> =
+        Vec::new();
+
+    // Add my player's cards
+    let my_id = s
+        .my_id
+        .as_ref()
+        .expect(ERROR_PLAYER_ID_NOT_SET)
+        .parse::<u8>()
+        .unwrap();
+    all_players_cards.push((my_id, s.my_revealed_cards[0], s.my_revealed_cards[1]));
+
+    // Add other players' cards
+    for (_, player_info) in s.players_info.iter() {
+        if let Some(player_id) = player_info.id {
+            if player_id != my_id {
+                all_players_cards.push((
+                    player_id,
+                    player_info.opened_cards[0],
+                    player_info.opened_cards[1],
+                ));
+            }
+        }
+    }
+
+    // Sort by player ID to ensure consistent ordering
+    all_players_cards.sort_by_key(|(id, _, _)| *id);
+
+    // Collect community cards
+    let community_cards: Vec<u8> = s
+        .revealed_community_cards
+        .iter()
+        .map(|card| {
+            card.map(|c| card_to_numeric(&c))
+                .expect("Community card should be revealed")
+        })
+        .collect();
+
+    // Prepare inputs for the circuit
+    // Add community cards as public input
+    for &card in &community_cards {
+        s.provers
+            .prover_calculate_winners
+            .add_input("communityCards", card as u64);
+    }
+
+    // Add private cards for each player
+    for (player_idx, (_, card1_opt, card2_opt)) in all_players_cards.iter().enumerate() {
+        if let (Some(card1), Some(card2)) = (card1_opt, card2_opt) {
+            let card1_num = card_to_numeric(card1);
+            let card2_num = card_to_numeric(card2);
+
+            // Add cards as privateCards[player_idx][0] and privateCards[player_idx][1]
+            // The circuit expects: privateCards[numPlayers][2]
+            s.provers.prover_calculate_winners.add_input(
+                &format!("privateCards[{}][0]", player_idx),
+                card1_num as u64,
+            );
+            s.provers.prover_calculate_winners.add_input(
+                &format!("privateCards[{}][1]", player_idx),
+                card2_num as u64,
+            );
+        }
+    }
+
+    // Generate proof
+    match s.provers.prover_calculate_winners.generate_proof() {
+        Ok((public_inputs, proof)) => {
+            info!("Successfully generated score calculation proof");
+            let (public_js, proof_js) = format_proof_for_js(&public_inputs, &proof);
+
+            // Send to frontend
+            let set_players_scores = s.set_players_scores.clone();
+            
+
+            if let Err(e) = set_players_scores.call2(&JsValue::NULL, &public_js, &proof_js) {
+                error!("set_players_scores callback failed: {:?}", e);
+            } else {
+                info!("Successfully sent scores to frontend");
+            }
+        }
+        Err(e) => {
+            error!("Failed to generate score calculation proof: {:?}", e);
+        }
+    }
+}
+
+/// Check if all cards are revealed and calculate scores if so
+fn check_and_calculate_scores(state: Rc<RefCell<PokerState>>) {
+    let are_all_revealed = {
+        let s = state.borrow();
+        are_all_cards_revealed(&s)
+    };
+
+    if are_all_revealed {
+        info!("All cards revealed, calculating scores");
+        calculate_and_send_scores(state);
+    }
+}
+
+/// Format public inputs and proof for JavaScript callback
+/// Returns (public_str, proof_str) as JsValue
+fn format_proof_for_js(public: &[Bn254Fr], proof: &zk_reshuffle::Proof) -> (JsValue, JsValue) {
+    let public_clone = public.to_vec();
+    let proof_clone = proof.clone();
+
+    let a = (proof_clone.a.x, proof_clone.a.y);
+    let b = (
+        proof_clone.b.x.c0,
+        proof_clone.b.x.c1,
+        proof_clone.b.y.c0,
+        proof_clone.b.y.c1,
+    );
+    let c = (proof_clone.c.x, proof_clone.c.y);
+
+    let public_str = JsValue::from_str(&format!("{:?}", public_clone));
+    let proof_str = JsValue::from_str(&format!("{:?}", (a, b, c)));
+
+    (public_str, proof_str)
 }
 
 fn handle_reveal_token_community_cards_received(
@@ -857,6 +1056,8 @@ fn handle_reveal_token_community_cards_received(
                     match open_card(&pp, &tokens_for_open, &card_mapping, &deck[index]) {
                         Ok(card) => {
                             info!("Community Card{:?}: {:?}", index, card);
+                            // Store revealed community card
+                            s.revealed_community_cards[index] = Some(card);
                             // Accumulate instead of sending immediately
                             revealed_indices.push(index);
                             revealed_cards.push(card);
@@ -888,6 +1089,10 @@ fn handle_reveal_token_community_cards_received(
             error!("set_community_card callback failed: {:?}", e);
         }
     }
+
+    drop(s); // Release the borrow before calling check_and_calculate_scores
+             // Check if all cards are revealed and calculate scores (outside the borrow)
+    check_and_calculate_scores(state);
 }
 
 fn handle_reveal_all_cards_received(
@@ -1460,22 +1665,7 @@ fn shuffle_remask_and_send(
 
                     let verify_shuffling_clone = s.verify_shuffling.clone();
 
-                    let public_clone = public.clone();
-                    let proof_clone = proof.clone();
-
-                    let a = (proof_clone.a.x, proof_clone.a.y);
-                    let b = (
-                        proof_clone.b.x.c0,
-                        proof_clone.b.x.c1,
-                        proof_clone.b.y.c0,
-                        proof_clone.b.y.c1,
-                    );
-
-                    // let b = (proof_clone.b.x.c0, proof_clone.b.y.c0, proof_clone.b.x.c1, proof_clone.b.y.c1);
-                    let c = (proof_clone.c.x, proof_clone.c.y);
-
-                    let public_str = JsValue::from_str(&format!("{:?}", public_clone));
-                    let proof_str = JsValue::from_str(&format!("{:?}", (a, b, c)));
+                    let (public_str, proof_str) = format_proof_for_js(&public, &proof);
 
                     if let Err(e) =
                         verify_shuffling_clone.call2(&JsValue::NULL, &public_str, &proof_str)
@@ -1492,6 +1682,8 @@ fn shuffle_remask_and_send(
                         info!("DEBUG: Saving proof and public data to files...");
 
                         // Crear contenido detallado para debugging
+                        let public_clone_debug = public.clone();
+                        let proof_clone_debug = proof.clone();
                         let debug_content = format!(
                             "=== SHUFFLING PROOF DEBUG DATA ===\n\
                             Timestamp: {}\n\n\
@@ -1511,25 +1703,25 @@ fn shuffle_remask_and_send(
                                 .to_iso_string()
                                 .as_string()
                                 .unwrap_or_default(),
-                            public_clone.len(),
-                            public_clone,
-                            proof_clone.a.x.to_string(),
-                            proof_clone.a.y.to_string(),
-                            proof_clone.b.x.c0.to_string(),
-                            proof_clone.b.x.c1.to_string(),
-                            proof_clone.b.y.c0.to_string(),
-                            proof_clone.b.y.c1.to_string(),
-                            proof_clone.c.x.to_string(),
-                            proof_clone.c.y.to_string(),
-                            proof_clone.a.x.to_string(),
-                            proof_clone.a.y.to_string(),
-                            proof_clone.b.x.c0.to_string(),
-                            proof_clone.b.x.c1.to_string(),
-                            proof_clone.b.y.c0.to_string(),
-                            proof_clone.b.y.c1.to_string(),
-                            proof_clone.c.x.to_string(),
-                            proof_clone.c.y.to_string(),
-                            public_clone
+                            public_clone_debug.len(),
+                            public_clone_debug,
+                            proof_clone_debug.a.x.to_string(),
+                            proof_clone_debug.a.y.to_string(),
+                            proof_clone_debug.b.x.c0.to_string(),
+                            proof_clone_debug.b.x.c1.to_string(),
+                            proof_clone_debug.b.y.c0.to_string(),
+                            proof_clone_debug.b.y.c1.to_string(),
+                            proof_clone_debug.c.x.to_string(),
+                            proof_clone_debug.c.y.to_string(),
+                            proof_clone_debug.a.x.to_string(),
+                            proof_clone_debug.a.y.to_string(),
+                            proof_clone_debug.b.x.c0.to_string(),
+                            proof_clone_debug.b.x.c1.to_string(),
+                            proof_clone_debug.b.y.c0.to_string(),
+                            proof_clone_debug.b.y.c1.to_string(),
+                            proof_clone_debug.c.x.to_string(),
+                            proof_clone_debug.c.y.to_string(),
+                            public_clone_debug
                                 .iter()
                                 .map(|fr| fr.to_string())
                                 .collect::<Vec<String>>()
@@ -1544,7 +1736,7 @@ fn shuffle_remask_and_send(
 
                         // Guardar solo los public signals en formato JSON
                         let public_json = serde_json::to_string_pretty(
-                            &public_clone
+                            &public_clone_debug
                                 .iter()
                                 .map(|fr| fr.to_string())
                                 .collect::<Vec<String>>(),

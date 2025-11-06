@@ -10,7 +10,6 @@ use std::rc::Rc;
 use web_sys::{RtcDataChannel, RtcPeerConnection};
 use zk_reshuffle::CircomProver;
 
-
 #[derive(Clone)]
 pub struct PlayerInfo {
     pub peer_connection: RtcPeerConnection,
@@ -25,7 +24,6 @@ pub struct PlayerInfo {
     pub reveal_tokens: [Vec<(RevealToken, Rc<RevealProof>, PublicKey)>; 2],
 }
 
-
 impl std::fmt::Debug for PlayerInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlayerInfo")
@@ -37,7 +35,10 @@ impl std::fmt::Debug for PlayerInfo {
             .field("proof_key", &self.proof_key)
             .field("cards", &self.cards)
             .field("cards_public", &self.cards_public)
-            .field("reveal_tokens", &"<Vec<(RevealToken, Rc<RevealProof>, PublicKey)>>")
+            .field(
+                "reveal_tokens",
+                &"<Vec<(RevealToken, Rc<RevealProof>, PublicKey)>>",
+            )
             .finish()
     }
 }
@@ -140,6 +141,10 @@ pub struct PokerState {
     pub public_shuffle_bytes: Vec<(u8, Vec<u8>)>,
     pub proof_shuffle_bytes: Vec<u8>,
     pub is_all_public_shuffle_bytes_received: bool,
+
+    // Store revealed cards for score calculation
+    pub my_revealed_cards: [Option<ClassicPlayingCard>; 2],
+    pub revealed_community_cards: [Option<ClassicPlayingCard>; 5],
     // pub phase: GamePhase,
 }
 

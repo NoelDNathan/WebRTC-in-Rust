@@ -716,6 +716,8 @@ fn create_poker_state() -> PokerState {
         public_shuffle_bytes: Vec::new(),
         proof_shuffle_bytes: Vec::new(),
         is_all_public_shuffle_bytes_received: false,
+        my_revealed_cards: [None, None],
+        revealed_community_cards: [None, None, None, None, None],
     }
 }
 
