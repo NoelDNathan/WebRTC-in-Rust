@@ -1,3 +1,4 @@
+use serde_json::json;
 use wasm_bindgen::prelude::*;
 
 use crate::poker_state::{GamePhase, PokerState};
@@ -156,8 +157,17 @@ fn reveal_community_cards(
     // Now compute reveal tokens without needing the state
     let mut rng = StdRng::from_entropy();
     let mut reveal_tokens_bytes = Vec::new();
+    let mut reveal_tokens_data = Vec::new();
 
     for &index in &card_indices {
+        info!(
+            "(Rust) Computing reveal token for {} - index: {}, card: {} {}",
+            round_name,
+            index,
+            current_deck[index].0.to_string(),
+            current_deck[index].1.to_string()
+        );
+
         let reveal_token: (RevealToken, RevealProof, PublicKey) = player
             .compute_reveal_token(&mut rng, &pp, &current_deck[index])
             .unwrap_or_else(|_| {
@@ -175,20 +185,65 @@ fn reveal_community_cards(
         });
 
         reveal_tokens_bytes.push(reveal_token_bytes);
+        reveal_tokens_data.push(reveal_token);
     }
 
-    // Separate scope for mutable borrow - ONLY for sending the message
+    // Separate scope for mutable borrow - ONLY for sending the message and callback
     // This ensures the borrow is released immediately after sending
     {
         let mut s = state.borrow_mut();
         let card_indices_u8: Vec<u8> = card_indices.iter().map(|&i| i as u8).collect();
-        let message =
-            ProtocolMessage::RevealTokenCommunityCards(reveal_tokens_bytes, card_indices_u8);
+        let message = ProtocolMessage::RevealTokenCommunityCards(
+            reveal_tokens_bytes,
+            card_indices_u8.clone(),
+        );
 
         if let Err(e) = send_protocol_message(&mut *s, message) {
             error!(
                 "Error sending reveal token community cards for {}: {:?}",
                 round_name, e
+            );
+        }
+
+        // Call JavaScript callback to send reveal tokens to smart contract
+        let verify_reveal_token_community_cards_clone =
+            s.verify_reveal_token_community_cards.clone();
+
+        // Build a JSON-like string with all reveal token data
+        // Format: JSON array with objects containing: index, token (x, y), A (x, y), B (x, y), r
+        // We serialize the points and let the frontend parse them
+        let mut token_data = Vec::new();
+        for (i, &index) in card_indices.iter().enumerate() {
+            let (token, proof, _) = &reveal_tokens_data[i];
+
+            info!("(Rust) in loop >> Token: {:?}", token.0.to_string());
+            info!("(Rust) in loop>> Proof: {:?}", proof.a.to_string());
+            info!("(Rust) in loop>> Proof: {:?}", proof.b.to_string());
+            info!("(Rust) in loop>> Proof: {:?}", proof.r.to_string());
+            // Serialize points as [x, y] arrays for easy parsing in TypeScript
+            let token_obj = json!({
+                "index": index,
+                "token":  token.0.to_string(),
+                "A": proof.a.to_string(),
+                "B": proof.b.to_string(),
+                "r": proof.r.to_string()
+            });
+            token_data.push(token_obj);
+        }
+
+        info!("(Rust) >> Token data: {:?}", token_data);
+        let json_data = serde_json::to_string(&token_data).unwrap_or_else(|_| "[]".to_string());
+        let args = JsValue::from_str(&json_data);
+
+        if let Err(e) = verify_reveal_token_community_cards_clone.call1(&JsValue::NULL, &args) {
+            error!(
+                "verify_reveal_token_community_cards callback failed for {}: {:?}",
+                round_name, e
+            );
+        } else {
+            info!(
+                "Successfully called verify_reveal_token_community_cards callback for {}",
+                round_name
             );
         }
     } // Borrow is definitely released here
@@ -255,7 +310,7 @@ pub fn reveal_private_cards_players(state: Rc<RefCell<PokerState>>) {
 
     let message =
         ProtocolMessage::RevealToken(my_id as u8, reveal_token1_bytes, reveal_token2_bytes);
-    
+
     // Restore the player after all operations are complete
     s.my_player = Some(player);
     if let Err(e) = send_protocol_message(&mut *s, message) {
@@ -266,8 +321,6 @@ pub fn reveal_private_cards_players(state: Rc<RefCell<PokerState>>) {
             my_id
         );
     }
-
-    
 }
 
 pub fn reveal_all_cards(state: Rc<RefCell<PokerState>>) {

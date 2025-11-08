@@ -196,6 +196,7 @@ pub fn register_poker_callbacks(
     verify_shuffling: Function,
     start_game: Function,
     verify_reveal_token: Function,
+    verify_reveal_token_community_cards: Function,
     set_private_cards: Function,
     set_other_player_private_cards: Function,
     set_community_card: Function,
@@ -207,6 +208,7 @@ pub fn register_poker_callbacks(
         state.verify_shuffling = verify_shuffling;
         state.start_game = start_game;
         state.verify_reveal_token = verify_reveal_token;
+        state.verify_reveal_token_community_cards = verify_reveal_token_community_cards;
         state.set_private_cards = set_private_cards;
         state.set_other_player_private_cards = set_other_player_private_cards;
         state.set_community_card = set_community_card;
@@ -709,6 +711,7 @@ fn create_poker_state() -> PokerState {
         verify_shuffling: js_sys::Function::new_no_args(""),
         start_game: js_sys::Function::new_no_args(""),
         verify_reveal_token: js_sys::Function::new_no_args(""),
+        verify_reveal_token_community_cards: js_sys::Function::new_no_args(""),
         set_private_cards: js_sys::Function::new_no_args(""),
         set_community_card: js_sys::Function::new_no_args(""),
         set_players_scores: js_sys::Function::new_no_args(""),

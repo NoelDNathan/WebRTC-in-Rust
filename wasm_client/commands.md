@@ -13,7 +13,8 @@ wasm-pack build --out-dir pkg-rayon/ --out-name wasm_client_rayon  --no-opt --ta
 wasm-pack build --out-dir pkg-rayon/ --out-name wasm_client_rayon --target web . -Z build-std=panic_abort,std -Z next-lockfile-bump -F rayon
 
 
-
+wasm-pack build --out-dir pkg-rayon/ 
+--out-name wasm_client_rayon --target web . -Z build-std=panic_abort,std -Z next-lockfile-bump -F rayon
 
 $env:RUSTFLAGS="-C target-feature=+atomics,+bulk-memory"
 $env:RUSTFLAGS='-C target-feature=+atomics,+bulk-memory --cfg getrandom_backend="wasm_js"'

@@ -133,6 +133,7 @@ pub struct PokerState {
     pub verify_shuffling: js_sys::Function,
     pub start_game: js_sys::Function,
     pub verify_reveal_token: js_sys::Function,
+    pub verify_reveal_token_community_cards: js_sys::Function,
     pub set_private_cards: js_sys::Function,
     pub set_community_card: js_sys::Function,
     pub set_players_scores: js_sys::Function,
