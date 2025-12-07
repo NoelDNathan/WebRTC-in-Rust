@@ -193,10 +193,15 @@ pub fn init_poker_engine() {
 #[wasm_bindgen]
 pub fn register_poker_callbacks(
     verify_public_key: Function,
+    set_player_info: Function,
+    set_joint_pk: Function,
     verify_shuffling: Function,
     start_game: Function,
+    set_initial_deck: Function,
     verify_reveal_token: Function,
     verify_reveal_token_community_cards: Function,
+    send_all_reveal_tokens: Function,
+    set_encrypted_cards: Function,
     set_private_cards: Function,
     set_other_player_private_cards: Function,
     set_community_card: Function,
@@ -205,10 +210,15 @@ pub fn register_poker_callbacks(
     if let Some(poker_state) = get_poker_state() {
         let mut state = poker_state.borrow_mut();
         state.verify_public_key = verify_public_key;
+        state.set_player_info = set_player_info;
+        state.set_joint_pk = set_joint_pk;
         state.verify_shuffling = verify_shuffling;
         state.start_game = start_game;
+        state.set_initial_deck = set_initial_deck;
         state.verify_reveal_token = verify_reveal_token;
         state.verify_reveal_token_community_cards = verify_reveal_token_community_cards;
+        state.send_all_reveal_tokens = send_all_reveal_tokens;
+        state.set_encrypted_cards = set_encrypted_cards;
         state.set_private_cards = set_private_cards;
         state.set_other_player_private_cards = set_other_player_private_cards;
         state.set_community_card = set_community_card;
@@ -707,11 +717,17 @@ fn create_poker_state() -> PokerState {
         proof_reshuffle_bytes: Vec::new(),
         is_reshuffling: false,
         is_all_public_reshuffle_bytes_received: false,
+        all_tokens_sent: false,
         verify_public_key: js_sys::Function::new_no_args(""),
+        set_player_info: js_sys::Function::new_no_args(""),
+        set_joint_pk: js_sys::Function::new_no_args(""),
         verify_shuffling: js_sys::Function::new_no_args(""),
         start_game: js_sys::Function::new_no_args(""),
+        set_initial_deck: js_sys::Function::new_no_args(""),
         verify_reveal_token: js_sys::Function::new_no_args(""),
         verify_reveal_token_community_cards: js_sys::Function::new_no_args(""),
+        send_all_reveal_tokens: js_sys::Function::new_no_args(""),
+        set_encrypted_cards: js_sys::Function::new_no_args(""),
         set_private_cards: js_sys::Function::new_no_args(""),
         set_community_card: js_sys::Function::new_no_args(""),
         set_players_scores: js_sys::Function::new_no_args(""),

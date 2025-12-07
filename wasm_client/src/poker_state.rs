@@ -116,8 +116,8 @@ pub struct PokerState {
     pub num_players_connected: usize,
     pub current_shuffler: u8,
     pub current_reshuffler: u8,
-    pub received_reveal_tokens1: Vec<(RevealToken, Rc<RevealProof>, PublicKey)>,
-    pub received_reveal_tokens2: Vec<(RevealToken, Rc<RevealProof>, PublicKey)>,
+    pub received_reveal_tokens1: Vec<(u8, RevealToken, Rc<RevealProof>, PublicKey)>, // (sender_id, token, proof, pk)
+    pub received_reveal_tokens2: Vec<(u8, RevealToken, Rc<RevealProof>, PublicKey)>, // (sender_id, token, proof, pk)
 
     pub community_cards_tokens: Vec<Vec<(RevealToken, Rc<RevealProof>, PublicKey)>>,
 
@@ -127,13 +127,20 @@ pub struct PokerState {
 
     pub is_reshuffling: bool,
     pub is_all_public_reshuffle_bytes_received: bool,
+    pub all_tokens_sent: bool,
 
     // Javascript callbacks
     pub verify_public_key: js_sys::Function,
+    pub set_player_info: js_sys::Function,
+    pub set_joint_pk: js_sys::Function,
+
     pub verify_shuffling: js_sys::Function,
     pub start_game: js_sys::Function,
+    pub set_initial_deck: js_sys::Function,
     pub verify_reveal_token: js_sys::Function,
     pub verify_reveal_token_community_cards: js_sys::Function,
+    pub send_all_reveal_tokens: js_sys::Function,
+    pub set_encrypted_cards: js_sys::Function,
     pub set_private_cards: js_sys::Function,
     pub set_community_card: js_sys::Function,
     pub set_players_scores: js_sys::Function,

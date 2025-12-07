@@ -1,10 +1,12 @@
 use crate::poker_state::{PlayerInfo, PokerState};
 use ark_ff::to_bytes;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use js_sys::{Object, Reflect};
 use log::{error, info, warn};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -165,6 +167,7 @@ pub fn handle_poker_message(
             }
             ProtocolMessage::ShuffledAndRemaskedCards(remasked_bytes, proof_bytes) => {
                 info!("Received shuffled and remasked cards");
+                // Legacy??
                 if let Err(e) =
                     handle_shuffled_and_remasked_cards_received(state, remasked_bytes, proof_bytes)
                 {
@@ -265,6 +268,19 @@ fn handle_public_key_info_received(
                         player_info.id = Some(new_player_id);
                         player_info.public_key = Some(pk_val.clone());
                         player_info.proof_key = Some(proof_val.clone());
+                        let set_player_info_clone = s.set_player_info.clone();
+
+                        let r = proof_val.random_commit.to_string();
+                        let s = proof_val.opening.to_string();
+
+                        let _ = set_player_info_clone.call5(
+                            &JsValue::NULL,
+                            &JsValue::from_str(&name),
+                            &JsValue::from_str(&new_player_id.to_string()),
+                            &JsValue::from_str(&pk_val.to_string()),
+                            &JsValue::from_str(&r),
+                            &JsValue::from_str(&s),
+                        );
                     } else {
                         warn!(
                             "Attempted to update player {}, but entry was not found. Skipping update.",
@@ -292,6 +308,11 @@ fn handle_public_key_info_received(
                 match CardProtocol::compute_aggregate_key(&pp, &s.pk_proof_info_array) {
                     Ok(aggregate_key) => {
                         s.joint_pk = Some(aggregate_key);
+                        let set_joint_pk_clone = s.set_joint_pk.clone();
+                        let _ = set_joint_pk_clone.call1(
+                            &JsValue::NULL,
+                            &JsValue::from_str(&aggregate_key.to_string()),
+                        );
                         info!("Joint public key: {:?}", aggregate_key.to_string());
 
                         // Return info needed for dealt_cards, but release borrow first
@@ -350,6 +371,15 @@ fn handle_encoded_cards_received(
 
     info!("Got encoded cards");
     let list_of_cards = deserialize_canonical::<Vec<Card>>(&encoded_cards)?;
+
+    let cards_string = list_of_cards
+        .iter()
+        .map(|card| card.0.to_string())
+        .collect::<Vec<String>>();
+    let cards_str = JsValue::from_str(&format!("{:?}", cards_string));
+
+    let set_initial_deck_clone = s.set_initial_deck.clone();
+    let _ = set_initial_deck_clone.call1(&JsValue::NULL, &cards_str);
 
     s.card_mapping = Some(encode_cards_ext(list_of_cards.clone()));
     let mut rng = StdRng::from_entropy();
@@ -426,6 +456,10 @@ fn handle_shuffled_and_remasked_cards_received(
                 } else {
                     s.current_shuffler = 0;
                     info!("All players shuffled, revealing cards");
+
+                    // Enviar cartas encriptadas al frontend
+                    send_encrypted_cards(&s);
+
                     let my_id = s
                         .my_id
                         .as_ref()
@@ -694,8 +728,18 @@ fn handle_reveal_token_received(
             s.received_reveal_tokens1.len()
         );
     }
-    s.received_reveal_tokens1.push(reveal_token1_rc);
-    s.received_reveal_tokens2.push(reveal_token2_rc);
+    s.received_reveal_tokens1.push((
+        id,
+        reveal_token1_rc.0,
+        reveal_token1_rc.1,
+        reveal_token1_rc.2,
+    ));
+    s.received_reveal_tokens2.push((
+        id,
+        reveal_token2_rc.0,
+        reveal_token2_rc.1,
+        reveal_token2_rc.2,
+    ));
 
     // the player himself is not counted, only the other players
     if s.received_reveal_tokens2.len() == num_players_connected - 1 {
@@ -707,6 +751,11 @@ fn handle_reveal_token_received(
             .expect(ERROR_PLAYER_ID_NOT_SET)
             .parse::<usize>()
             .unwrap();
+        // Verificar y enviar tokens si todas las condiciones se cumplen
+        // Esta función verifica ambas condiciones (recibidos y enviados) y solo envía una vez
+        // También verifica que sea el dealer
+        check_and_send_all_tokens(&mut s);
+
         let index1 = player_id * 2 + 5;
         let index2 = player_id * 2 + 1 + 5;
 
@@ -718,7 +767,7 @@ fn handle_reveal_token_received(
         let mut tokens_for_peek1: Vec<(RevealToken, RevealProof, PublicKey)> = s
             .received_reveal_tokens1
             .drain(..)
-            .map(|(token, proof_rc, key)| {
+            .map(|(_, token, proof_rc, key)| {
                 let mut serialized = Vec::new();
                 proof_rc
                     .serialize(&mut serialized)
@@ -733,7 +782,7 @@ fn handle_reveal_token_received(
         let mut tokens_for_peek2: Vec<(RevealToken, RevealProof, PublicKey)> = s
             .received_reveal_tokens2
             .drain(..)
-            .map(|(token, proof_rc, key)| {
+            .map(|(_, token, proof_rc, key)| {
                 let mut serialized = Vec::new();
                 proof_rc
                     .serialize(&mut serialized)
@@ -941,7 +990,6 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
 
             // Send to frontend
             let set_players_scores = s.set_players_scores.clone();
-            
 
             if let Err(e) = set_players_scores.call2(&JsValue::NULL, &public_js, &proof_js) {
                 error!("set_players_scores callback failed: {:?}", e);
@@ -987,6 +1035,212 @@ fn format_proof_for_js(public: &[Bn254Fr], proof: &zk_reshuffle::Proof) -> (JsVa
     let proof_str = JsValue::from_str(&format!("{:?}", (a, b, c)));
 
     (public_str, proof_str)
+}
+
+/// Check if all conditions are met to send tokens to frontend and send them if so
+/// This function can be called from multiple places but will only execute once
+fn check_and_send_all_tokens(s: &mut PokerState) {
+    // Si ya se envió, no hacer nada
+    if s.all_tokens_sent {
+        return;
+    }
+
+    let my_id = match s.my_id.as_ref() {
+        Some(id_str) => match id_str.parse::<u8>() {
+            Ok(id) => id,
+            Err(_) => {
+                error!("Failed to parse my_id: {}", id_str);
+                return;
+            }
+        },
+        None => {
+            error!("my_id not set");
+            return;
+        }
+    };
+
+    // Verificar condición 1: Se han recibido todos los tokens
+    let all_tokens_received = s.received_reveal_tokens2.len() == s.num_players_connected - 1;
+
+    // Verificar condición 2: Se han enviado tokens a todos los otros jugadores
+    let mut players_with_tokens = 0;
+    for (_peer_id, player_info) in &s.players_info {
+        if let Some(other_player_id) = player_info.id {
+            if other_player_id != my_id {
+                if !player_info.reveal_tokens[0].is_empty()
+                    && !player_info.reveal_tokens[1].is_empty()
+                {
+                    players_with_tokens += 1;
+                }
+            }
+        }
+    }
+    let expected_players = s.num_players_connected - 1;
+    let all_tokens_sent = players_with_tokens == expected_players;
+
+    // Solo enviar si ambas condiciones se cumplen
+    if all_tokens_received && all_tokens_sent {
+        info!("Dealer: All conditions met: received {} tokens and sent to {} players, sending to frontend", 
+              s.received_reveal_tokens2.len(), players_with_tokens);
+        send_all_tokens(s);
+        s.all_tokens_sent = true;
+    } else {
+        info!(
+            "Dealer: Conditions not met yet: received={} (need {}), sent={} (need {})",
+            s.received_reveal_tokens2.len(),
+            s.num_players_connected - 1,
+            players_with_tokens,
+            expected_players
+        );
+    }
+}
+
+/// Send all reveal tokens (sent and received) to the frontend
+/// IMPORTANTE: Solo incluye tokens para las cartas de OTROS jugadores, NO las propias
+fn send_all_tokens(s: &PokerState) {
+    let my_id = match s.my_id.as_ref() {
+        Some(id_str) => match id_str.parse::<u8>() {
+            Ok(id) => id,
+            Err(_) => {
+                error!("Failed to parse my_id: {}", id_str);
+                return;
+            }
+        },
+        None => {
+            error!("my_id not set");
+            return;
+        }
+    };
+
+    let num_players = s.num_players_connected;
+
+    // Construir matriz tokens[sender_id][receiver_id] = [token_card1, token_card2]
+    // Formato: matriz 2D donde cada elemento es [token_card1, token_card2]
+    let tokens_matrix = js_sys::Array::new();
+
+    // Inicializar matriz completa con valores por defecto
+    for sender_idx in 0..num_players {
+        let sender_array = js_sys::Array::new();
+        for receiver_idx in 0..num_players {
+            // Inicializar con [null, null] (será reemplazado con tokens reales)
+            let token_pair = js_sys::Array::new();
+            token_pair.push(&JsValue::NULL);
+            token_pair.push(&JsValue::NULL);
+            sender_array.push(&token_pair);
+        }
+        tokens_matrix.push(&sender_array);
+    }
+
+    // 1. Llenar tokens[sender_id][receiver_id] para tokens ENVIADOS (my_id como sender)
+    // tokens[my_id][receiver_id] = tokens que yo envié a receiver_id
+    for (_peer_id, player_info) in &s.players_info {
+        if let Some(receiver_id) = player_info.id {
+            // Solo procesar jugadores que NO somos nosotros
+            if receiver_id != my_id {
+                // Obtener el primer token de cada carta (card1 y card2)
+                let token_card1 = player_info.reveal_tokens[0]
+                    .first()
+                    .map(|(token, _, _)| token.0.to_string());
+                let token_card2 = player_info.reveal_tokens[1]
+                    .first()
+                    .map(|(token, _, _)| token.0.to_string());
+
+                if let (Some(token1_str), Some(token2_str)) = (token_card1, token_card2) {
+                    let token_pair = js_sys::Array::new();
+                    token_pair.push(&JsValue::from_str(&token1_str));
+                    token_pair.push(&JsValue::from_str(&token2_str));
+                    let token_pair_js: JsValue = token_pair.into();
+
+                    // tokens[my_id][receiver_id] = [token_card1, token_card2]
+                    if let Some(sender_row) =
+                        tokens_matrix.get(my_id as u32).dyn_ref::<js_sys::Array>()
+                    {
+                        let _ = sender_row.set(receiver_id as u32, token_pair_js);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Llenar tokens[sender_id][receiver_id] para tokens RECIBIDOS (my_id como receiver)
+    // tokens[sender_id][my_id] = tokens que sender_id me envió a mí
+    for (sender_id, token1, _, _) in &s.received_reveal_tokens1 {
+        let token1_str = token1.0.to_string();
+
+        // Buscar el token correspondiente de card2
+        if let Some((_, token2, _, _)) = s
+            .received_reveal_tokens2
+            .iter()
+            .find(|(sid, _, _, _)| sid == sender_id)
+        {
+            let token2_str = token2.0.to_string();
+            let token_pair = js_sys::Array::new();
+            token_pair.push(&JsValue::from_str(&token1_str));
+            token_pair.push(&JsValue::from_str(&token2_str));
+            let token_pair_js: JsValue = token_pair.into();
+
+            // tokens[sender_id][my_id] = [token_card1, token_card2]
+            if let Some(sender_row) = tokens_matrix
+                .get(*sender_id as u32)
+                .dyn_ref::<js_sys::Array>()
+            {
+                let _ = sender_row.set(my_id as u32, token_pair_js);
+            }
+        }
+    }
+
+    // Crear el objeto final con el formato de matriz
+    let all_tokens_obj = Object::new();
+    let _ = Reflect::set(&all_tokens_obj, &"tokens".into(), &tokens_matrix);
+
+    // Llamar al callback con la matriz de tokens
+    if let Err(e) = s
+        .send_all_reveal_tokens
+        .call1(&JsValue::NULL, &all_tokens_obj.into())
+    {
+        error!("send_all_reveal_tokens callback failed: {:?}", e);
+    } else {
+        info!("Successfully sent all reveal tokens to frontend in matrix format");
+    }
+}
+
+/// Send encrypted cards (deck) to frontend after all players have shuffled
+fn send_encrypted_cards(s: &PokerState) {
+    let deck = match &s.deck {
+        Some(deck) => deck,
+        None => {
+            error!("Deck not set, cannot send encrypted cards");
+            return;
+        }
+    };
+
+    // Crear un array con todas las cartas encriptadas
+    let cards_array = js_sys::Array::new();
+    for (index, card) in deck.iter().enumerate() {
+        let card_obj = Object::new();
+        let _ = Reflect::set(&card_obj, &"index".into(), &JsValue::from_f64(index as f64));
+        let _ = Reflect::set(
+            &card_obj,
+            &"x".into(),
+            &JsValue::from_str(&card.0.to_string()),
+        );
+        let _ = Reflect::set(
+            &card_obj,
+            &"y".into(),
+            &JsValue::from_str(&card.1.to_string()),
+        );
+        cards_array.push(&card_obj);
+    }
+
+    // Llamar al callback
+    if let Err(e) = s.set_encrypted_cards.call1(&JsValue::NULL, &cards_array) {
+        error!("set_encrypted_cards callback failed: {:?}", e);
+    } else {
+        info!(
+            "Successfully sent encrypted cards to frontend ({} cards)",
+            deck.len()
+        );
+    }
 }
 
 fn handle_reveal_token_community_cards_received(
@@ -1945,6 +2199,10 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
             if s.current_shuffler == s.num_players_connected as u8 - 1 {
                 s.current_shuffler = 0;
                 info!("All players shuffled, revealing cards");
+
+                // Enviar cartas encriptadas al frontend
+                send_encrypted_cards(&s);
+
                 let id = s
                     .my_id
                     .as_ref()
@@ -2080,6 +2338,10 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                         error!("Error sending reveal token: {:?}", e);
                     }
                 }
+
+                // Después de enviar todos los tokens, verificar si se pueden enviar al frontend
+                // Esta función verifica ambas condiciones (recibidos y enviados) y solo envía una vez
+                check_and_send_all_tokens(s);
             }
             info!("Shuffle verified");
             // Restore the player after all operations are complete
