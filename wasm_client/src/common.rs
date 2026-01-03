@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 use std::rc::Rc;
 
-use crate::handle_poker_messages::get_peer_id;
+use crate::handle_poker_messages::{
+    dealt_cards, get_peer_id, handle_poker_message, is_dealer, NUM_PLAYERS_EXPECTED,
+};
 use crate::poker_state::PlayerInfo;
 use barnett_smart_card_protocol::BarnettSmartProtocol;
 use js_sys::{Array, Function, Object, Promise, Reflect};
@@ -24,10 +26,8 @@ use web_sys::{
     RtcIceTransportPolicy, RtcPeerConnection, WebSocket,
 };
 
-use shared_protocol::{SessionID, SignalEnum, UserID};
-
-use crate::handle_poker_messages::handle_poker_message;
 use crate::poker_state::{PokerState, Provers};
+use shared_protocol::{SessionID, SignalEnum, UserID};
 use zk_reshuffle::CircomProver;
 
 // ============================================
@@ -144,6 +144,55 @@ pub fn poker_reveal_all_cards() {
         frontend_msgs::reveal_all_cards(state);
     } else {
         error!("poker_reveal_all_cards: no state");
+    }
+}
+
+#[wasm_bindgen]
+pub fn poker_reset_for_new_game() {
+    info!("poker_reset_for_new_game");
+    if let Some(state) = get_poker_state() {
+        // Use a scope to ensure borrow is released even on panic
+        let result = {
+            let mut s = state.borrow_mut();
+            s.reset_for_new_game();
+
+            // Check if we should deal cards after reset
+            info!("s.num_players_connected: {}", s.num_players_connected);
+            let should_deal_cards =
+                s.num_players_connected == NUM_PLAYERS_EXPECTED && s.joint_pk.is_some();
+            info!("s.joint_pk.is_some(): {}", s.joint_pk.is_some());
+            info!("should_deal_cards: {}", should_deal_cards);
+            info!("s.my_id: {:?}", s.my_id);
+
+            let is_dealer_check = if let Some(player_id) = &s.my_id {
+                info!("is_dealer_check: ");
+                info!("s.current_dealer: {}", s.current_dealer);
+                is_dealer(s.current_dealer, player_id)
+            } else {
+                false
+            };
+
+            info!("is_dealer_check: {}", is_dealer_check);
+            info!("should_deal_cards: {}", should_deal_cards);
+
+            if should_deal_cards && is_dealer_check {
+                info!("All players connected after reset, starting game");
+                dealt_cards(&mut *s)
+            } else {
+                Ok(())
+            }
+        };
+
+        match result {
+            Ok(_) => {
+                info!("poker_reset_for_new_game: completed successfully");
+            }
+            Err(e) => {
+                error!("poker_reset_for_new_game: failed: {:?}", e);
+            }
+        }
+    } else {
+        error!("poker_reset_for_new_game: no state");
     }
 }
 

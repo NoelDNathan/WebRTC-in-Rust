@@ -50,7 +50,7 @@ const ERROR_PLAYERINFO_PROOF_KEY_NOT_SET: &str = "PlayerInfo proof key should be
 const M: usize = 2;
 const N: usize = 26;
 const NUM_OF_CARDS: usize = M * N;
-const NUM_PLAYERS_EXPECTED: usize = 2;
+pub const NUM_PLAYERS_EXPECTED: usize = 2;
 
 const DEBUG_MODE: bool = true;
 
@@ -1652,7 +1652,7 @@ fn validate_chunks(chunks: &[(u8, Vec<u8>)], expected_length: u8) -> bool {
     true
 }
 
-fn is_dealer(current_dealer: u8, player_id: &String) -> bool {
+pub fn is_dealer(current_dealer: u8, player_id: &String) -> bool {
     current_dealer == player_id.parse::<u8>().unwrap()
 }
 
@@ -1706,7 +1706,7 @@ pub fn get_peer_id(data_channel: RtcDataChannel) -> String {
     }
 }
 
-fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
+pub fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
     info!("The player is the dealer.");
 
     let mut rng = StdRng::from_entropy();

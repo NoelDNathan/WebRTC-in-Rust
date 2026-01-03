@@ -6,6 +6,7 @@ use texas_holdem::{
     ProofKeyOwnership, PublicKey, RevealProof, RevealToken,
 };
 
+use log::error;
 use std::rc::Rc;
 use web_sys::{RtcDataChannel, RtcPeerConnection};
 use zk_reshuffle::CircomProver;
@@ -154,6 +155,51 @@ pub struct PokerState {
     pub my_revealed_cards: [Option<ClassicPlayingCard>; 2],
     pub revealed_community_cards: [Option<ClassicPlayingCard>; 5],
     // pub phase: GamePhase,
+}
+
+impl PokerState {
+    pub fn reset_for_new_game(&mut self) {
+        // Reset game-specific state while keeping connection info
+        self.deck = None;
+        self.card_mapping = None;
+        self.received_reveal_tokens1 = Vec::new();
+        self.received_reveal_tokens2 = Vec::new();
+        self.community_cards_tokens = vec![Vec::new(); 5];
+        self.public_reshuffle_bytes = Vec::new();
+        self.proof_reshuffle_bytes = Vec::new();
+        self.is_reshuffling = false;
+        self.is_all_public_reshuffle_bytes_received = false;
+        self.all_tokens_sent = false;
+        self.public_shuffle_bytes = Vec::new();
+        self.proof_shuffle_bytes = Vec::new();
+        self.is_all_public_shuffle_bytes_received = false;
+        self.my_revealed_cards = [None, None];
+        self.revealed_community_cards = [None, None, None, None, None];
+
+        // Reset player cards but keep connection info
+        for player_info in self.players_info.values_mut() {
+            player_info.cards = [None, None];
+            player_info.cards_public = [None, None];
+            player_info.opened_cards = [None, None];
+            player_info.reveal_tokens = [Vec::new(), Vec::new()];
+        }
+
+        // CRITICAL: Reset the provers' builders so they can generate new proofs
+        // The builder is consumed during generate_proof(), so we need to recreate it
+        if let Err(e) = self.provers.prover_shuffle.reset_shuffle_builder() {
+            error!("Failed to reset shuffle builder: {:?}", e);
+        }
+        if let Err(e) = self.provers.prover_reshuffle.reset_reshuffle_builder() {
+            error!("Failed to reset reshuffle builder: {:?}", e);
+        }
+        if let Err(e) = self
+            .provers
+            .prover_calculate_winners
+            .reset_calculate_winners_builder()
+        {
+            error!("Failed to reset calculate_winners builder: {:?}", e);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
