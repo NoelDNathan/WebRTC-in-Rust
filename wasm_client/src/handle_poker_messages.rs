@@ -566,6 +566,15 @@ fn handle_reveal_token_received(
     };
     let mut s = state.borrow_mut();
 
+    // DEBUG: check indices
+    if let Some(my_id_str) = &s.my_id {
+       if let Ok(my_id) = my_id_str.parse::<u8>() {
+           let idx1 = (my_id as usize) * 2 + 5;
+           let idx2 = (my_id as usize) * 2 + 1 + 5;
+           info!("DEBUG: handle_reveal_token_received - My ID: {}, Potential card indices: {} and {} (deck len: {})", my_id, idx1, idx2, deck.len());
+       }
+    }
+
     info!("Got reveal token");
     let reveal_token1 =
         deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token1_bytes)
@@ -910,82 +919,176 @@ fn are_all_cards_revealed(state: &PokerState) -> bool {
     true
 }
 
+/// Helper function to get rank and suit from card
+fn card_to_rank_suit(card: &ClassicPlayingCard) -> (u8, u8) {
+    let card_str = format!("{:?}", card);
+
+    let suit_value = match card_str.chars().last() {
+        Some('♣') => 0, // Club
+        Some('♦') => 1, // Diamond
+        Some('♥') => 2, // Heart
+        Some('♠') => 3, // Spade
+        _ => 0,
+    };
+
+    let value_str = card_str.trim_end_matches(|c| c == '♣' || c == '♦' || c == '♥' || c == '♠');
+
+    let rank_value = match value_str {
+        "2" => 0,
+        "3" => 1,
+        "4" => 2,
+        "5" => 3,
+        "6" => 4,
+        "7" => 5,
+        "8" => 6,
+        "9" => 7,
+        "10" => 8,
+        "J" => 9, // Jack
+        "Q" => 10, // Queen
+        "K" => 11, // King
+        "A" => 12, // Ace
+        _ => 0,
+    };
+
+    (rank_value, suit_value)
+}
+
 /// Calculate player scores using the ZK circuit and send to frontend
 fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
     let mut s = state.borrow_mut();
 
-    let num_players = s.num_players_connected;
+    // DEBUG: Log deck and mappings
+    if let Some(deck) = &s.deck {
+        info!("DEBUG: deck by index: {:?}", deck.iter().map(|c| c.0.to_string()).collect::<Vec<_>>());
+    }
+    if let Some(map) = &s.card_mapping {
+        info!("DEBUG: card_mapping keys count: {}", map.len());
+        for (k, v) in map.iter() {
+             info!("DEBUG: mapping {} -> {:?}", k.0.to_string(), v);
+        }
+    }
+
+
+    let num_players_connected = s.num_players_connected;
+    
+    // Fixed number of players for the circuit
+    let circuit_num_players = 4;
 
     // Collect all players' cards in order (by player ID)
-    let mut all_players_cards: Vec<(u8, Option<ClassicPlayingCard>, Option<ClassicPlayingCard>)> =
-        Vec::new();
+    // Map: player_id -> (card1, card2)
+    let mut players_cards_map: HashMap<u8, (Option<ClassicPlayingCard>, Option<ClassicPlayingCard>)> = HashMap::new();
 
     // Add my player's cards
-    let my_id = s
-        .my_id
-        .as_ref()
-        .expect(ERROR_PLAYER_ID_NOT_SET)
-        .parse::<u8>()
-        .unwrap();
-    all_players_cards.push((my_id, s.my_revealed_cards[0], s.my_revealed_cards[1]));
+    if let Some(my_id_str) = &s.my_id {
+        if let Ok(my_id) = my_id_str.parse::<u8>() {
+             players_cards_map.insert(my_id, (s.my_revealed_cards[0], s.my_revealed_cards[1]));
+        }
+    }
 
     // Add other players' cards
     for (_, player_info) in s.players_info.iter() {
         if let Some(player_id) = player_info.id {
-            if player_id != my_id {
-                all_players_cards.push((
-                    player_id,
-                    player_info.opened_cards[0],
-                    player_info.opened_cards[1],
-                ));
-            }
+             players_cards_map.insert(player_id, (player_info.opened_cards[0], player_info.opened_cards[1]));
         }
     }
-
-    // Sort by player ID to ensure consistent ordering
-    all_players_cards.sort_by_key(|(id, _, _)| *id);
 
     // Collect community cards
-    let community_cards: Vec<u8> = s
+    let community_cards: Vec<ClassicPlayingCard> = s
         .revealed_community_cards
         .iter()
-        .map(|card| {
-            card.map(|c| card_to_numeric(&c))
-                .expect("Community card should be revealed")
-        })
+        .filter_map(|c| *c)
         .collect();
-
-    // Prepare inputs for the circuit
-    // Add community cards as public input
-    for &card in &community_cards {
-        s.provers
-            .prover_calculate_winners
-            .add_input("communityCards", card as u64);
+    
+    // Ensure we have 5 community cards
+    if community_cards.len() != 5 {
+        error!("Not enough community cards revealed: {}", community_cards.len());
+        return;
     }
 
-    // Add private cards for each player
-    for (player_idx, (_, card1_opt, card2_opt)) in all_players_cards.iter().enumerate() {
-        if let (Some(card1), Some(card2)) = (card1_opt, card2_opt) {
-            let card1_num = card_to_numeric(card1);
-            let card2_num = card_to_numeric(card2);
+    // Prepare inputs for the circuit
+    // The circuit expects:
+    // signal input cardsRank[numPlayers][7];
+    // signal input cardsSuit[numPlayers][7];
+    
+    let mut dummy_card = ClassicPlayingCard::new(
+        texas_holdem::Value::Two,
+        texas_holdem::Suite::Spade
+    ); // 2♠ (Rank 2, Suit 3) - standard lowest card, shouldn't matter for empty slots effectively
 
-            // Add cards as privateCards[player_idx][0] and privateCards[player_idx][1]
-            // The circuit expects: privateCards[numPlayers][2]
-            s.provers.prover_calculate_winners.add_input(
-                &format!("privateCards[{}][0]", player_idx),
-                card1_num as u64,
-            );
-            s.provers.prover_calculate_winners.add_input(
-                &format!("privateCards[{}][1]", player_idx),
-                card2_num as u64,
-            );
+    // Iterate for fixed number of players in circuit (4)
+    // We assume player IDs are approximate to 0..N-1, or we map them.
+    // However, the circuit just takes 4 hands. We need to fill them with active players first.
+    // The previous logic sorted by ID. We will do the same.
+    
+    let mut sorted_ids: Vec<u8> = players_cards_map.keys().cloned().collect();
+    sorted_ids.sort();
+    
+    for i in 0..circuit_num_players {
+        let mut hand_cards = Vec::with_capacity(7);
+        
+        if i < sorted_ids.len() {
+            let player_id = sorted_ids[i];
+            if let Some((c1_opt, c2_opt)) = players_cards_map.get(&player_id) {
+                if let (Some(c1), Some(c2)) = (c1_opt, c2_opt) {
+                    hand_cards.push(*c1);
+                    hand_cards.push(*c2);
+                } else {
+                     // Should not happen if check_and_calculate_scores verifies all are revealed
+                     hand_cards.push(dummy_card);
+                     hand_cards.push(dummy_card);
+                }
+            } else {
+                hand_cards.push(dummy_card);
+                hand_cards.push(dummy_card);
+            }
+        } else {
+            // Empty player slot (if fewer than 4 players connected)
+            // Fill with dummy cards that won't win (e.g. 2s 3d 4h 5s 7c - low high card)
+            // Or just same dummy cards. 
+            hand_cards.push(dummy_card);
+            hand_cards.push(dummy_card);
         }
+        
+        // Add community cards to every hand
+        for cc in &community_cards {
+            hand_cards.push(*cc);
+        }
+
+        // Sort by rank descending (using the corrected 0-12 rank values)
+        hand_cards.sort_by(|a, b| {
+            let (rank_a, _) = card_to_rank_suit(a);
+            let (rank_b, _) = card_to_rank_suit(b);
+            rank_b.cmp(&rank_a)
+        });
+        
+        // Ensure we have 7 cards (should be true: 2 hole + 5 community)
+        // Now add to circuit inputs
+        let mut numeric_inputs_rank = Vec::new();
+        let mut numeric_inputs_suit = Vec::new();
+        for (j, card) in hand_cards.iter().enumerate() {
+            let (rank, suit) = card_to_rank_suit(card);
+            numeric_inputs_rank.push(rank);
+            numeric_inputs_suit.push(suit);
+            
+            s.provers.prover_calculate_winners.add_input("cardsRank", rank as u64);
+            s.provers.prover_calculate_winners.add_input("cardsSuit", suit as u64);
+        }
+        
+        info!("Prepared inputs for player {} (circuit index {}): {:?}", 
+              if i < sorted_ids.len() { sorted_ids[i].to_string() } else { "EMPTY".to_string() }, 
+              i, hand_cards);
+        info!("DEBUG: Numeric inputs for circuit {} - Ranks: {:?}, Suits: {:?}", i, numeric_inputs_rank, numeric_inputs_suit);
     }
 
     // Generate proof
     match s.provers.prover_calculate_winners.generate_proof() {
         Ok((public_inputs, proof)) => {
             info!("Successfully generated score calculation proof");
+            
+            // DEBUG: Print public signals
+            let public_strs: Vec<String> = public_inputs.iter().map(|fr| fr.to_string()).collect();
+            info!("DEBUG: public_signals (len={}): {:?}", public_strs.len(), public_strs);
+
             let (public_js, proof_js) = format_proof_for_js(&public_inputs, &proof);
 
             // Send to frontend

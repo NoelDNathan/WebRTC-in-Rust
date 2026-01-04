@@ -184,6 +184,19 @@ impl PokerState {
             player_info.reveal_tokens = [Vec::new(), Vec::new()];
         }
 
+        // Reset own player card data too
+        if let Some(my_player) = &mut self.my_player {
+            my_player.cards = vec![];
+            my_player.cards_public = vec![];
+            my_player.opened_cards = vec![];
+        }
+
+
+        // Reset shuffler/reshuffler indices
+        self.current_shuffler = 0;
+        self.current_reshuffler = 0;
+        self.all_tokens_sent = false;
+
         // CRITICAL: Reset the provers' builders so they can generate new proofs
         // The builder is consumed during generate_proof(), so we need to recreate it
         if let Err(e) = self.provers.prover_shuffle.reset_shuffle_builder() {
