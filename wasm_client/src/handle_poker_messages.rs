@@ -395,24 +395,6 @@ fn handle_encoded_cards_received(
                 .map(|x| x.0)
                 .collect::<Vec<MaskedCard>>(),
         );
-
-        // TRIGGER: Check if it's my turn to shuffle (usually Player 0)
-        let my_id = s.my_id.as_ref().and_then(|id| id.parse::<u8>().ok());
-        if let Some(id) = my_id {
-            if s.current_shuffler == id {
-                info!("Handled EncodedCards: It's my turn to shuffle (ID: {})", id);
-                let deck = s.deck.as_ref().unwrap().clone();
-                match shuffle_remask_and_send(&mut *s, &deck) {
-                    Ok(shuffled) => {
-                        s.deck = Some(shuffled);
-                        s.current_shuffler += 1;
-                    }
-                    Err(e) => error!("Failed to start shuffling: {:?}", e),
-                }
-            } else {
-                info!("Handled EncodedCards: Waiting for player {} to shuffle (my id: {})", s.current_shuffler, id);
-            }
-        }
     } else {
         error!("{}", ERROR_JOINT_PK_NOT_SET);
     }
@@ -428,27 +410,13 @@ fn handle_shuffled_and_remasked_cards_received(
     // then release it before taking a mutable borrow below.
     let (pp, pk, mut current_deck, num_players_connected) = {
         let s_ro = state.borrow();
-        
-        let joint_pk = match s_ro.joint_pk.as_ref() {
-            Some(pk) => pk.clone(),
-            None => {
-                warn!("Received ShuffledAndRemaskedCards but joint_pk is not set. Skipping.");
-                return Ok(());
-            }
-        };
-        
-        let deck = match s_ro.deck.as_ref() {
-            Some(d) => d.clone(),
-            None => {
-                warn!("Received ShuffledAndRemaskedCards but deck is not set. Skipping.");
-                return Ok(());
-            }
-        };
-
         (
             s_ro.pp.clone(),
-            joint_pk,
-            deck,
+            s_ro.joint_pk
+                .as_ref()
+                .expect(ERROR_JOINT_PK_NOT_SET)
+                .clone(),
+            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
             s_ro.num_players_connected,
         )
     };
@@ -587,24 +555,14 @@ fn handle_reveal_token_received(
 ) {
     let (card_mapping, deck, num_players_connected) = {
         let s_ro = state.borrow();
-        
-        let mapping = match s_ro.card_mapping.as_ref() {
-            Some(m) => m.clone(),
-            None => {
-                warn!("Received RevealToken but card_mapping is not set. This might be a stale message from a previous round.");
-                return;
-            }
-        };
-        
-        let d = match s_ro.deck.as_ref() {
-            Some(d) => d.clone(),
-            None => {
-                warn!("Received RevealToken but deck is not set. This might be a stale message from a previous round.");
-                return;
-            }
-        };
-        
-        (mapping, d, s_ro.num_players_connected)
+        (
+            s_ro.card_mapping
+                .as_ref()
+                .expect(ERROR_CARD_MAPPING_NOT_SET)
+                .clone(),
+            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
+            s_ro.num_players_connected,
+        )
     };
     let mut s = state.borrow_mut();
 
@@ -1141,9 +1099,6 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
             } else {
                 info!("Successfully sent scores to frontend");
             }
-            if let Err(e) = s.provers.prover_calculate_winners.reset_calculate_winners_builder() {
-                error!("Failed to reset calculate_winners builder: {:?}", e);
-            }
         }
         Err(e) => {
             error!("Failed to generate score calculation proof: {:?}", e);
@@ -1399,24 +1354,14 @@ fn handle_reveal_token_community_cards_received(
     // Take immutable snapshot of fields needed across mutable operations
     let (pp, deck, card_mapping) = {
         let s_ro = state.borrow();
-        
-        let mapping = match s_ro.card_mapping.as_ref() {
-            Some(m) => m.clone(),
-            None => {
-                warn!("Received RevealTokenCommunityCards but card_mapping is not set. Skipping.");
-                return;
-            }
-        };
-        
-        let d = match s_ro.deck.as_ref() {
-            Some(d) => d.clone(),
-            None => {
-                warn!("Received RevealTokenCommunityCards but deck is not set. Skipping.");
-                return;
-            }
-        };
-        
-        (s_ro.pp.clone(), d, mapping)
+        (
+            s_ro.pp.clone(),
+            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
+            s_ro.card_mapping
+                .as_ref()
+                .expect(ERROR_CARD_MAPPING_NOT_SET)
+                .clone(),
+        )
     };
 
     let mut s = state.borrow_mut();
@@ -1512,25 +1457,12 @@ fn handle_reveal_all_cards_received(
     reveal_all_cards_bytes: Vec<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (pp, deck, card_mapping) = {
-        let s_ro = state.borrow();
-        
-        let deck = match s_ro.deck.as_ref() {
-            Some(d) => d.clone(),
-            None => {
-                warn!("Received RevealAllCards but deck is not set. Skipping.");
-                return Ok(());
-            }
-        };
-
-        let mapping = match s_ro.card_mapping.as_ref() {
-            Some(m) => m.clone(),
-            None => {
-                warn!("Received RevealAllCards but card_mapping is not set. Skipping.");
-                return Ok(());
-            }
-        };
-
-        (s_ro.pp.clone(), deck, mapping)
+        let s = state.borrow();
+        (
+            s.pp.clone(),
+            s.deck.clone().expect(ERROR_DECK_NOT_SET),
+            s.card_mapping.clone().expect(ERROR_CARD_MAPPING_NOT_SET),
+        )
     };
 
     let mut s = state.borrow_mut();
@@ -1925,22 +1857,10 @@ pub fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
         // }
     }
 
-    s.deck = Some(deck.clone());
-    s.card_mapping = Some(card_mapping);
+    let shuffled_deck = shuffle_remask_and_send(s, &deck).expect(ERROR_SHUFFLE_REMASK_FAILDED);
 
-    // TRIGGER: Check if it's my turn to shuffle (only if dealer is Player 0)
-    let my_id = s.my_id.as_ref().and_then(|id| id.parse::<u8>().ok());
-    if let Some(id) = my_id {
-        if s.current_shuffler == id {
-            info!("Dealer starting: It's my turn to shuffle (ID: {})", id);
-            let deck_to_shuffle = s.deck.as_ref().unwrap().clone();
-            let shuffled_deck = shuffle_remask_and_send(s, &deck_to_shuffle).expect(ERROR_SHUFFLE_REMASK_FAILDED);
-            s.deck = Some(shuffled_deck);
-            s.current_shuffler += 1;
-        } else {
-            info!("Dealer starting: Waiting for player {} to shuffle (my id: {})", s.current_shuffler, id);
-        }
-    }
+    s.deck = Some(shuffled_deck.clone());
+    s.card_mapping = Some(card_mapping);
 
     Ok(())
 }
@@ -2340,30 +2260,10 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
 
     let proof = deserialize_proof(&s.proof_shuffle_bytes)?;
     let pp = s.pp.clone();
-    let joint_pk = match s.joint_pk.as_ref() {
-        Some(pk) => pk,
-        None => {
-            warn!("process_shuffle_verification: joint_pk not set. Skipping.");
-            return Ok(());
-        }
-    };
-    let mut deck = match s.deck.take() {
-        Some(d) => d,
-        None => {
-            warn!("process_shuffle_verification: deck not set. Skipping.");
-            return Ok(());
-        }
-    };
+    let joint_pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
+    let mut deck = s.deck.take().expect(ERROR_DECK_NOT_SET);
 
-    let mut player = match s.my_player.take() {
-        Some(p) => p,
-        None => {
-            error!("process_shuffle_verification: player not set!");
-            // Restore deck if we can't proceed
-            s.deck = Some(deck);
-            return Ok(());
-        }
-    };
+    let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
     let mut rng = StdRng::from_entropy();
 
     match CardProtocol::verify_shuffle_remask2(
@@ -2392,17 +2292,14 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                     Ok(new_deck) => {
                         s.deck = Some(new_deck.clone());
                         deck = new_deck.clone();
-                        s.current_shuffler += 1;
                     }
                     Err(e) => {
                         error!("Error in shuffle verification: {:?}", e);
                     }
                 }
             }
-            
-            info!("Current shuffling progress: {}/{}", s.current_shuffler, s.num_players_connected);
 
-            if s.current_shuffler == s.num_players_connected as u8 {
+            if s.current_shuffler == s.num_players_connected as u8 - 1 {
                 s.current_shuffler = 0;
                 info!("All players shuffled, revealing cards");
 
@@ -2550,11 +2447,6 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
                 check_and_send_all_tokens(s);
             }
             info!("Shuffle verified");
-            // Clear buffers for next shuffle
-            s.public_shuffle_bytes.clear();
-            s.proof_shuffle_bytes.clear();
-            s.is_all_public_shuffle_bytes_received = false;
-
             // Restore the player after all operations are complete
             s.my_player = Some(player);
             Ok(())
@@ -2580,13 +2472,7 @@ pub fn verify_remask_for_reshuffle(
     let public_cards_2 = player_cards[1].clone();
     info!("player_cards 1: {:?}", public_cards_1.0.to_string());
     info!("player_cards 2: {:?}", public_cards_2.0.to_string());
-    let card_mapping = match s.card_mapping.as_ref() {
-        Some(m) => m,
-        None => {
-            warn!("verify_remask_for_reshuffle: card_mapping not set. Skipping.");
-            return Err("card_mapping not set".into());
-        }
-    };
+    let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
     let m_list = card_mapping.keys().cloned().collect::<Vec<Card>>();
     let proof = deserialize_proof(&s.proof_reshuffle_bytes).expect(ERROR_DESERIALIZE_PROOF_FAILED);
@@ -2606,39 +2492,18 @@ pub fn verify_remask_for_reshuffle(
         })
         .collect();
 
-    let joint_pk = match s.joint_pk.as_ref() {
-        Some(pk) => pk,
-        None => {
-            warn!("verify_remask_for_reshuffle: joint_pk not set. Skipping.");
-            return Err("joint_pk not set".into());
-        }
-    };
-    let deck = match s.deck.as_ref() {
-        Some(d) => d,
-        None => {
-            warn!("verify_remask_for_reshuffle: deck not set. Skipping.");
-            return Err("deck not set".into());
-        }
-    };
-
     match CardProtocol::verify_reshuffle_remask(
         &mut s.provers.prover_reshuffle,
         &s.pp,
-        joint_pk,
-        deck,
+        &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
+        &s.deck.as_ref().expect(ERROR_DECK_NOT_SET),
         &player_cards,
         player_pk,
         &m_list,
         public_fr,
         proof,
     ) {
-        Ok(reshuffled_deck) => {
-            // Clear buffers for next reshuffle
-            s.public_reshuffle_bytes.clear();
-            s.proof_reshuffle_bytes.clear();
-            s.is_all_public_reshuffle_bytes_received = false;
-            Ok(reshuffled_deck)
-        }
+        Ok(reshuffled_deck) => Ok(reshuffled_deck),
         Err(e) => {
             error!("Error verifying reshuffle remask: {:?}", e);
             Err(Box::new(e))
@@ -2716,10 +2581,6 @@ fn send_remask_for_reshuffle(
             {
                 error!("Error sending zk proof: {:?}", e);
                 return Err(format!("{:?}", e).into());
-            }
-
-            if let Err(e) = s.provers.prover_reshuffle.reset_reshuffle_builder() {
-                error!("Failed to reset reshuffle builder: {:?}", e);
             }
 
             Ok((public, proof))

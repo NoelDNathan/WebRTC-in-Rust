@@ -741,7 +741,6 @@ fn create_poker_state() -> PokerState {
         prover_shuffle,
         prover_calculate_winners,
     };
-    let provers_master = provers.clone();
 
     PokerState {
         room_id: None,
@@ -755,7 +754,6 @@ fn create_poker_state() -> PokerState {
         card_mapping: None,
         deck: None,
         provers: provers,
-        master_provers: provers_master,
         current_dealer: 0,
         num_players_connected: 1,
         current_shuffler: 0,

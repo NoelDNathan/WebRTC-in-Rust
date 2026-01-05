@@ -6,7 +6,7 @@ use texas_holdem::{
     ProofKeyOwnership, PublicKey, RevealProof, RevealToken,
 };
 
-use log::{error, info};
+use log::error;
 use std::rc::Rc;
 use web_sys::{RtcDataChannel, RtcPeerConnection};
 use zk_reshuffle::CircomProver;
@@ -72,7 +72,6 @@ impl PlayerInfo {
     }
 }
 
-#[derive(Clone)]
 pub struct Provers {
     pub prover_reshuffle: CircomProver,
     pub prover_shuffle: CircomProver,
@@ -113,7 +112,6 @@ pub struct PokerState {
     pub card_mapping: Option<HashMap<Card, ClassicPlayingCard>>,
     pub deck: Option<Vec<MaskedCard>>,
     pub provers: Provers,
-    pub master_provers: Provers,
 
     pub current_dealer: u8,
     pub num_players_connected: usize,
@@ -198,17 +196,6 @@ impl PokerState {
         self.current_shuffler = 0;
         self.current_reshuffler = 0;
         self.all_tokens_sent = false;
-
-        // Increment dealer for next round
-        if self.num_players_connected > 0 {
-            let next_dealer = (self.current_dealer + 1) % (self.num_players_connected as u8);
-            info!("Rotating dealer: {} -> {}", self.current_dealer, next_dealer);
-            self.current_dealer = next_dealer;
-        }
-
-        // PROTECT MEMORY: Clone from Master Provers to ensure clean keys for every game
-        // This is much faster than re-deserializing but safer than reusing potentially corrupted memory
-        self.provers = self.master_provers.clone();
 
         // CRITICAL: Reset the provers' builders so they can generate new proofs
         // The builder is consumed during generate_proof(), so we need to recreate it
