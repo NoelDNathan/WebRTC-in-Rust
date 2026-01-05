@@ -147,11 +147,24 @@ fn reveal_community_cards(
     // Clone all needed data BEFORE any mutable borrow to avoid borrowing conflicts
     let (pp, current_deck, player) = {
         let s_ro = state.borrow();
-        (
-            s_ro.pp.clone(),
-            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
-            s_ro.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET).clone(),
-        )
+        
+        let deck = match s_ro.deck.as_ref() {
+            Some(d) => d.clone(),
+            None => {
+                error!("(Rust) >> ERROR: reveal_community_cards called but deck is not set!");
+                return;
+            }
+        };
+
+        let player = match s_ro.my_player.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                error!("(Rust) >> ERROR: reveal_community_cards called but player is not set!");
+                return;
+            }
+        };
+        
+        (s_ro.pp.clone(), deck, player)
     };
 
     // Now compute reveal tokens without needing the state
@@ -258,15 +271,30 @@ pub fn reveal_private_cards_players(state: Rc<RefCell<PokerState>>) {
     info!("(Rust) >> Reveal private cards to all players!");
     let (pp, current_deck, my_id) = {
         let s_ro = state.borrow();
-        (
-            s_ro.pp.clone(),
-            s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
-            s_ro.my_id
-                .as_ref()
-                .expect(ERROR_PLAYER_ID_NOT_SET)
-                .parse::<usize>()
-                .unwrap(),
-        )
+        
+        let deck = match s_ro.deck.as_ref() {
+            Some(d) => d.clone(),
+            None => {
+                error!("(Rust) >> ERROR: reveal_private_cards_players called but deck is not set!");
+                return;
+            }
+        };
+
+        let my_id = match s_ro.my_id.as_ref() {
+            Some(id) => match id.parse::<usize>() {
+                Ok(parsed_id) => parsed_id,
+                Err(_) => {
+                    error!("(Rust) >> ERROR: Failed to parse my_id: {}", id);
+                    return;
+                }
+            },
+            None => {
+                error!("(Rust) >> ERROR: reveal_private_cards_players called but my_id is not set!");
+                return;
+            }
+        };
+        
+        (s_ro.pp.clone(), deck, my_id)
     };
 
     let mut s = state.borrow_mut();
@@ -330,8 +358,20 @@ pub fn reveal_all_cards(state: Rc<RefCell<PokerState>>) {
         s_ro.pp.clone()
     };
     let mut s = state.borrow_mut();
-    let current_deck = s.deck.as_ref().expect(ERROR_DECK_NOT_SET);
-    let player = s.my_player.as_ref().expect(ERROR_PLAYER_NOT_SET);
+    let current_deck = match s.deck.as_ref() {
+        Some(d) => d,
+        None => {
+            error!("(Rust) >> ERROR: reveal_all_cards called but deck is not set!");
+            return;
+        }
+    };
+    let player = match s.my_player.as_ref() {
+        Some(p) => p,
+        None => {
+            error!("(Rust) >> ERROR: reveal_all_cards called but player is not set!");
+            return;
+        }
+    };
     let mut rng = StdRng::from_entropy();
     let mut reveal_all_cards_bytes = vec![];
     for card in current_deck {
