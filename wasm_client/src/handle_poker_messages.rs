@@ -1099,6 +1099,9 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
             } else {
                 info!("Successfully sent scores to frontend");
             }
+            if let Err(e) = s.provers.prover_calculate_winners.reset_calculate_winners_builder() {
+                error!("Failed to reset calculate_winners builder: {:?}", e);
+            }
         }
         Err(e) => {
             error!("Failed to generate score calculation proof: {:?}", e);
@@ -2448,6 +2451,9 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
             }
             info!("Shuffle verified");
             // Restore the player after all operations are complete
+            s.public_shuffle_bytes.clear();
+            s.proof_shuffle_bytes.clear();
+            s.is_all_public_shuffle_bytes_received = false;
             s.my_player = Some(player);
             Ok(())
         }
@@ -2503,7 +2509,12 @@ pub fn verify_remask_for_reshuffle(
         public_fr,
         proof,
     ) {
-        Ok(reshuffled_deck) => Ok(reshuffled_deck),
+        Ok(reshuffled_deck) => {
+            s.public_reshuffle_bytes.clear();
+            s.proof_reshuffle_bytes.clear();
+            s.is_all_public_reshuffle_bytes_received = false;
+            Ok(reshuffled_deck)
+        }
         Err(e) => {
             error!("Error verifying reshuffle remask: {:?}", e);
             Err(Box::new(e))
@@ -2581,6 +2592,10 @@ fn send_remask_for_reshuffle(
             {
                 error!("Error sending zk proof: {:?}", e);
                 return Err(format!("{:?}", e).into());
+            }
+
+            if let Err(e) = s.provers.prover_reshuffle.reset_reshuffle_builder() {
+                error!("Failed to reset reshuffle builder: {:?}", e);
             }
 
             Ok((public, proof))

@@ -196,6 +196,13 @@ impl PokerState {
         self.current_shuffler = 0;
         self.current_reshuffler = 0;
         self.all_tokens_sent = false;
+        
+        // Increment dealer for next round
+        // if self.num_players_connected > 0 {
+        //     let next_dealer = (self.current_dealer + 1) % (self.num_players_connected as u8);
+        //     info!("Rotating dealer: {} -> {}", self.current_dealer, next_dealer);
+        //     self.current_dealer = next_dealer;
+        // }
 
         // CRITICAL: Reset the provers' builders so they can generate new proofs
         // The builder is consumed during generate_proof(), so we need to recreate it
