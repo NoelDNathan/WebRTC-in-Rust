@@ -410,6 +410,13 @@ fn handle_shuffled_and_remasked_cards_received(
     // then release it before taking a mutable borrow below.
     let (pp, pk, mut current_deck, num_players_connected) = {
         let s_ro = state.borrow();
+
+        // Handle race condition where shuffle message arrives after game reset
+        if s_ro.deck.is_none() {
+            log::warn!("Received shuffled cards but deck is not set. Ignoring message from potentially previous game.");
+            return Ok(());
+        }
+
         (
             s_ro.pp.clone(),
             s_ro.joint_pk
@@ -555,6 +562,13 @@ fn handle_reveal_token_received(
 ) {
     let (card_mapping, deck, num_players_connected) = {
         let s_ro = state.borrow();
+        
+        // Handle race condition where reveal token arrives after game reset
+        if s_ro.deck.is_none() {
+            log::warn!("Received reveal token but deck is not set. Ignoring message from potentially previous game.");
+            return;
+        }
+
         (
             s_ro.card_mapping
                 .as_ref()
@@ -1357,6 +1371,13 @@ fn handle_reveal_token_community_cards_received(
     // Take immutable snapshot of fields needed across mutable operations
     let (pp, deck, card_mapping) = {
         let s_ro = state.borrow();
+        
+        // Handle race condition where reveal token arrives after game reset
+        if s_ro.deck.is_none() {
+            log::warn!("Received community card reveal token but deck is not set. Ignoring message from potentially previous game.");
+            return;
+        }
+
         (
             s_ro.pp.clone(),
             s_ro.deck.as_ref().expect(ERROR_DECK_NOT_SET).clone(),
