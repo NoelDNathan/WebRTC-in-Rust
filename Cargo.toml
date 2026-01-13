@@ -1,0 +1,9 @@
+# Potential Workspace IDEAs
+[workspace]
+resolver = "2"
+members = [
+    "wasm_client",
+    "signalling-server",
+    "shared-protocol",
+    "turn-server"
+]

@@ -2,54 +2,24 @@
 name = "wasm_client"
 version = "0.1.0"
 authors = ["charles"]
-edition = "2021"
+edition = "2018"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["console_error_panic_hook"]
-rayon = [
-    "dep:rayon",
-    "dep:wasm-bindgen-rayon"
-]
 
 [dependencies]
-# base64ct = "=1.7.3"
-# ws_stream_wasm = "=0.7.4"
-# ruint = "=1.16.0"
-# hex-literal = "=0.4.1"
 arc-swap = "1.2.0"
 async-std = "1.9.0"
 log = "0.4.11"
 js-sys = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde-json-wasm = "0.3.1"
-serde_json = "1.0"
-wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+wasm-bindgen = { version = "0.2.88", features = ["serde-serialize"] }
 wasm-logger = "0.2.0"
-simd-adler32 = "0.3.6"
 wasm-bindgen-futures = "0.4.20"
-rand = "0.8.4"
-regex = "1.0.0"
-ark-ff = "0.3.0"
-ark-serialize = "0.3.0"
-ark-std = "0.3.0"
-ark-groth16 = "0.5.0"
-futures = "0.3"
-babyjubjub = {path = "../../babyjubjub"}
-barnett-smart-card-protocol = {path = "../../barnett-smart-card-protocol"}
-proof-essentials = {path = "../../proof-essentials"}
-zk-reshuffle = {path = "../../workspace-ark05/zk-reshuffle"}
-ark-bn254 = "0.5.0"
-
-rayon = { version = "1.8", optional = true }
-wasm-bindgen-rayon = { version = "1.2", optional = true }
-
-getrandom_v2 = { package = "getrandom", version = "0.2", features = ["js"] }
-getrandom_v3 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
-
-texas-holdem = {path = "../../texas-holdem"}
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
@@ -62,14 +32,11 @@ console_error_panic_hook = { version = "0.1.6", optional = true }
 shared-protocol = {path = "../shared-protocol"}
 
 
-
 [dependencies.web-sys]
 version = "0.3.47"
 features = [  
   "MessageEvent",
   "RtcPeerConnection",
-  "HtmlAnchorElement",
-  "Url",
   "RtcSignalingState",
   "RtcSdpType",
   "RtcSessionDescriptionInit",
@@ -79,7 +46,6 @@ features = [
   "RtcIceConnectionState",
   "RtcDataChannel",
   "RtcDataChannelEvent",
-  "RtcDataChannelState",
   "RtcSessionDescription",
   "RtcIceGatheringState",
   "RtcIceCredentialType",
@@ -114,4 +80,6 @@ features = [
 [dev-dependencies]
 wasm-bindgen-test = "0.3.13"
 
-
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"
