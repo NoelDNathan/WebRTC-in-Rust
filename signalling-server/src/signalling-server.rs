@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs::File;
 use std::{
     collections::HashMap,
@@ -27,19 +26,13 @@ type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
 type UserList = Arc<Mutex<HashMap<UserID, SocketAddr>>>;
 
 type SessionList = Arc<Mutex<HashMap<SessionID, SessionMembers>>>;
-type RoomList = Arc<Mutex<HashMap<SessionID, Room>>>;
+
 const LOG_FILE: &str = "/app/logs/signalling_server_prototype.log";
 
 #[derive(Debug, Clone)]
 struct SessionMembers {
     host: UserID,
     guest: Option<UserID>,
-}
-
-#[derive(Debug, Clone)]
-struct Room {
-    id: SessionID,
-    members: HashSet<UserID>,
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -87,7 +80,6 @@ type PeerID = UserID;
 enum Destination {
     SourcePeer,
     OtherPeer(PeerID),
-    Room(SessionID),
 }
 
 //   _    _                       _   _            __  __
@@ -103,7 +95,6 @@ fn handle_message(
     peer_map: PeerMap,
     user_list: UserList,
     session_list: SessionList,
-    room_list: RoomList,
     addr: SocketAddr,
     user_id: UserID,
     message_from_client: String,
@@ -248,8 +239,7 @@ fn handle_message(
         SignalEnum::ICEError(_, _) => {
             unimplemented!("IceError Handling")
         }
-        SignalEnum::SessionNew => {
-            let session_id = SessionID::new(generate_id(5));
+        SignalEnum::SessionNew(session_id) => {
             let sig_msg = SignalEnum::SessionReady(session_id.clone());
             let message = match serde_json::to_string(&sig_msg) {
                 Ok(msg) => msg,
@@ -323,7 +313,6 @@ fn handle_message(
 
             (message_json, Destination::OtherPeer(destination_peer))
         }
-
         ///////////////////////////////////
         SignalEnum::SessionJoin(session_id) => {
             debug!("inside Session Join ");
@@ -376,227 +365,6 @@ fn handle_message(
             debug!("    Session List {:?}", session_list);
             debug!("====================================");
             return Ok(());
-        }
-
-        SignalEnum::RoomCreate => {
-            let room_id = SessionID::new(generate_id(5));
-            let mut room = Room {
-                id: room_id.clone(),
-                members: HashSet::new(),
-            };
-            room.members.insert(user_id.clone());
-            room_list
-                .lock()
-                .unwrap()
-                .insert(room_id.clone(), room.clone());
-            let sig_msg = SignalEnum::RoomCreated(room_id.clone());
-            let message = match serde_json::to_string(&sig_msg) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    let e_msg =
-                        format!("Could not Serialize {:?} as RoomCreated, {:?}", room_id, e);
-                    return Err(e_msg);
-                }
-            };
-            (message, Destination::SourcePeer)
-        }
-        SignalEnum::RoomJoin(room_id) => {
-            let mut room_list_lock = room_list.lock().unwrap();
-            match room_list_lock.get_mut(&room_id) {
-                Some(room) => {
-                    // Get existing members before adding the new one
-                    let existing_members: Vec<UserID> = room.members.iter().cloned().collect();
-
-                    // Add the new user to the room
-                    room.members.insert(user_id.clone());
-
-                    // Send RoomJoined to the new user with existing members
-                    let sig_msg = SignalEnum::RoomJoined(room_id.clone(), existing_members.clone());
-                    let message = match serde_json::to_string(&sig_msg) {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            let e_msg = format!("Could not Serialize RoomJoined, {:?}", e);
-                            return Err(e_msg);
-                        }
-                    };
-
-                    // Notify existing members about the new peer
-                    let peer_joined_msg = SignalEnum::PeerJoined(room_id.clone(), user_id.clone());
-                    let peer_joined_message = match serde_json::to_string(&peer_joined_msg) {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            let e_msg = format!("Could not Serialize PeerJoined, {:?}", e);
-                            return Err(e_msg);
-                        }
-                    };
-
-                    // Send PeerJoined to all existing members
-                    for member in &existing_members {
-                        let user_list_lock = user_list.lock().unwrap();
-                        if let Some(socket_addr) = user_list_lock.get(member) {
-                            let peers = peer_map.lock().unwrap();
-                            if let Some(sender) = peers.get(socket_addr) {
-                                let _ = sender
-                                    .unbounded_send(Message::Text(peer_joined_message.clone()));
-                            }
-                        }
-                    }
-
-                    (message, Destination::SourcePeer)
-                }
-                None => {
-                    let sig_msg = SignalEnum::SessionJoinError(room_id);
-                    let message = match serde_json::to_string(&sig_msg) {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            let e_msg = format!("Could not Serialize SessionJoinError, {:?}", e);
-                            return Err(e_msg);
-                        }
-                    };
-                    (message, Destination::SourcePeer)
-                }
-            }
-        }
-        SignalEnum::PeerOffer {
-            room,
-            from,
-            to,
-            sdp,
-        } => {
-            // Verify the user is in the room
-            let room_list_lock = room_list.lock().unwrap();
-            if let Some(room_data) = room_list_lock.get(&room) {
-                if !room_data.members.contains(&from) || !room_data.members.contains(&to) {
-                    let e_msg = format!("User not in room for PeerOffer");
-                    return Err(e_msg);
-                }
-            } else {
-                let e_msg = format!("Room not found for PeerOffer");
-                return Err(e_msg);
-            }
-
-            let sig_msg = SignalEnum::PeerOffer {
-                room,
-                from,
-                to: to.clone(),
-                sdp,
-            };
-            let message = match serde_json::to_string(&sig_msg) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    let e_msg = format!("Could not Serialize PeerOffer, {:?}", e);
-                    return Err(e_msg);
-                }
-            };
-            (message, Destination::OtherPeer(to))
-        }
-
-        SignalEnum::PeerAnswer {
-            room,
-            from,
-            to,
-            sdp,
-        } => {
-            // Verify the user is in the room
-            let room_list_lock = room_list.lock().unwrap();
-            if let Some(room_data) = room_list_lock.get(&room) {
-                if !room_data.members.contains(&from) || !room_data.members.contains(&to) {
-                    let e_msg = format!("User not in room for PeerAnswer");
-                    return Err(e_msg);
-                }
-            } else {
-                let e_msg = format!("Room not found for PeerAnswer");
-                return Err(e_msg);
-            }
-
-            let sig_msg = SignalEnum::PeerAnswer {
-                room,
-                from,
-                to: to.clone(),
-                sdp,
-            };
-            let message = match serde_json::to_string(&sig_msg) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    let e_msg = format!("Could not Serialize PeerAnswer, {:?}", e);
-                    return Err(e_msg);
-                }
-            };
-            (message, Destination::OtherPeer(to))
-        }
-
-        SignalEnum::PeerIce {
-            room,
-            from,
-            to,
-            candidate,
-        } => {
-            // Verify the user is in the room
-            let room_list_lock = room_list.lock().unwrap();
-            if let Some(room_data) = room_list_lock.get(&room) {
-                if !room_data.members.contains(&from) || !room_data.members.contains(&to) {
-                    let e_msg = format!("User not in room for PeerIce");
-                    return Err(e_msg);
-                }
-            } else {
-                let e_msg = format!("Room not found for PeerIce");
-                return Err(e_msg);
-            }
-
-            let sig_msg = SignalEnum::PeerIce {
-                room,
-                from,
-                to: to.clone(),
-                candidate,
-            };
-            let message = match serde_json::to_string(&sig_msg) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    let e_msg = format!("Could not Serialize PeerIce, {:?}", e);
-                    return Err(e_msg);
-                }
-            };
-            (message, Destination::OtherPeer(to))
-        }
-
-        SignalEnum::RoomText(data, room_id) => {
-            // Verify the user is in the room
-            let room_list_lock = room_list.lock().unwrap();
-            if let Some(room_data) = room_list_lock.get(&room_id) {
-                if !room_data.members.contains(&user_id) {
-                    let e_msg = format!("User not in room for RoomText");
-                    return Err(e_msg);
-                }
-
-                // Broadcast to all members except sender
-                let sig_msg = SignalEnum::RoomText(data, room_id.clone());
-                let message = match serde_json::to_string(&sig_msg) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        let e_msg = format!("Could not Serialize RoomText, {:?}", e);
-                        return Err(e_msg);
-                    }
-                };
-
-                for member in &room_data.members {
-                    if *member != user_id {
-                        // Don't send back to sender
-                        let user_list_lock = user_list.lock().unwrap();
-                        if let Some(socket_addr) = user_list_lock.get(member) {
-                            let peers = peer_map.lock().unwrap();
-                            if let Some(sender) = peers.get(socket_addr) {
-                                let _ = sender.unbounded_send(Message::Text(message.clone()));
-                            }
-                        }
-                    }
-                }
-
-                // Return OK without sending to source (already broadcasted)
-                return Ok(());
-            } else {
-                let e_msg = format!("Room not found for RoomText");
-                return Err(e_msg);
-            }
         }
         _ => {
             error!("Should not recieve state, {:?}", result);
@@ -656,50 +424,6 @@ fn handle_message(
                 }
             }
         }
-        Destination::Room(room_id) => {
-            let room_list_lock = room_list.lock().unwrap();
-            let room = room_list_lock.get(&room_id);
-            match room {
-                Some(room) => {
-                    let members = room.members.clone();
-                    for member in members {
-                        let user_list_lock = user_list.lock().unwrap();
-                        let socket_of_member = user_list_lock.get(&member);
-                        match socket_of_member {
-                            Some(socket_addr) => {
-                                let peers = peer_map.lock().unwrap();
-                                let sender = match peers.get(socket_addr) {
-                                    Some(x) => x,
-                                    None => {
-                                        warn!("Peer was connection dropped from Hashmap, skipping member {:?}", member);
-                                        continue;
-                                    }
-                                };
-
-                                // Enviar el mensaje al miembro
-                                let send_res =
-                                    sender.unbounded_send(Message::Text(message_to_client.clone()));
-                                if send_res.is_err() {
-                                    error!(
-                                        "Error sending message to member {:?}: {:?}",
-                                        member, send_res
-                                    );
-                                }
-                            }
-                            None => {
-                                warn!("Could not find socket for member {:?}", member);
-                                continue;
-                            }
-                        }
-                    }
-                }
-                None => {
-                    let e_msg = format!("Could not find room with id {:?}", room_id);
-                    error!("{}", e_msg);
-                    return Err(e_msg);
-                }
-            }
-        }
     }
 
     Ok(())
@@ -737,7 +461,6 @@ async fn handle_connection(
     peer_map: PeerMap,
     user_list: UserList,
     session_list: SessionList,
-    room_list: RoomList,
     raw_stream: TcpStream,
     addr: SocketAddr,
 ) {
@@ -802,7 +525,6 @@ async fn handle_connection(
                 peer_map.clone(),
                 user_list.clone(),
                 session_list.clone(),
-                room_list.clone(),
                 addr,
                 user_id.clone(),
                 message,
@@ -848,51 +570,13 @@ async fn handle_connection(
     for s in sess_list {
         session_list.lock().unwrap().remove(&s);
     }
-
-    // Remove user from all rooms and notify other members
-    let rooms_to_clean: Vec<SessionID> = {
-        let mut room_list_lock = room_list.lock().unwrap();
-        let mut rooms_to_remove = Vec::new();
-
-        for (room_id, room) in room_list_lock.iter_mut() {
-            if room.members.contains(&user_id) {
-                room.members.remove(&user_id);
-
-                // Notify remaining members that this peer left
-                let peer_left_msg = SignalEnum::PeerLeft(room_id.clone(), user_id.clone());
-                if let Ok(message) = serde_json::to_string(&peer_left_msg) {
-                    for member in &room.members {
-                        let user_list_lock = user_list.lock().unwrap();
-                        if let Some(socket_addr) = user_list_lock.get(member) {
-                            let peers = peer_map.lock().unwrap();
-                            if let Some(sender) = peers.get(socket_addr) {
-                                let _ = sender.unbounded_send(Message::Text(message.clone()));
-                            }
-                        }
-                    }
-                }
-
-                // If room is empty, mark it for removal
-                if room.members.is_empty() {
-                    rooms_to_remove.push(room_id.clone());
-                }
-            }
-        }
-
-        // Remove empty rooms
-        for room_id in &rooms_to_remove {
-            room_list_lock.remove(room_id);
-        }
-
-        rooms_to_remove
-    };
 }
 
 async fn run() -> Result<(), IoError> {
     let user_list = UserList::new(Mutex::new(HashMap::new()));
     let session_list = SessionList::new(Mutex::new(HashMap::new()));
     let peer_map = PeerMap::new(Mutex::new(HashMap::new()));
-    let room_list = RoomList::new(Mutex::new(HashMap::new()));
+
     // Usar variable de entorno PORT (Render la proporciona automáticamente)
     let port = std::env::var("PORT").unwrap_or_else(|_| "2794".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
@@ -911,7 +595,6 @@ async fn run() -> Result<(), IoError> {
             peer_map.clone(),
             user_list.clone(),
             session_list.clone(),
-            room_list.clone(),
             stream,
             addr,
         ));
