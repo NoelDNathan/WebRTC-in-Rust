@@ -248,8 +248,7 @@ fn handle_message(
         SignalEnum::ICEError(_, _) => {
             unimplemented!("IceError Handling")
         }
-        SignalEnum::SessionNew => {
-            let session_id = SessionID::new(generate_id(5));
+        SignalEnum::SessionNew(session_id) => {
             let sig_msg = SignalEnum::SessionReady(session_id.clone());
             let message = match serde_json::to_string(&sig_msg) {
                 Ok(msg) => msg,

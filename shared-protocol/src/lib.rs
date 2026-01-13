@@ -39,7 +39,9 @@ pub enum SignalEnum {
     // Existing messages (keep for compatibility)
     NewUser(UserID),
     TextMessage(Vec<u8>, SessionID),
-    SessionNew,
+
+    // To manage a live session between two users
+    SessionNew(SessionID),
     SessionReady(SessionID),
     SessionJoin(SessionID),
     SessionJoinSuccess(SessionID),
