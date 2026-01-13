@@ -278,8 +278,12 @@ pub fn register_poker_callbacks(
 
 /// Create a new session (host)
 #[wasm_bindgen]
-pub async fn create_session(websocket_url: String, use_stun: bool) -> Result<JsValue, JsValue> {
-    info!("create_session");
+pub async fn create_session(
+    websocket_url: String,
+    session_id: String,
+    use_stun: bool,
+) -> Result<JsValue, JsValue> {
+    info!("create_session with session_id: {}", session_id);
 
     let app_state = get_or_create_app_state();
 
@@ -303,8 +307,9 @@ pub async fn create_session(websocket_url: String, use_stun: bool) -> Result<JsV
     // Setup data channel listener for incoming data channels
     setup_data_channel_listener(peer_connection.clone()).await?;
 
-    // Send session creation request
-    let msg = SignalEnum::SessionNew;
+    // Send session creation request with provided session_id
+    let session_id_obj = SessionID::new(session_id);
+    let msg = SignalEnum::SessionNew(session_id_obj);
     let ser_msg: String = serde_json_wasm::to_string(&msg)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
 

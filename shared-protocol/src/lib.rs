@@ -41,7 +41,7 @@ pub enum SignalEnum {
     TextMessage(Vec<u8>, SessionID),
 
     // To manage a live session between two users
-    SessionNew,
+    SessionNew(SessionID),
     SessionReady(SessionID),
     SessionJoin(SessionID),
     SessionJoinSuccess(SessionID),
