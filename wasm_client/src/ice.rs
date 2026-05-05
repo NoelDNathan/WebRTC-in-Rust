@@ -28,21 +28,16 @@ pub async fn setup_rtc_peer_connection_ice_callbacks(
     ws: WebSocket,
     rc_state: Rc<RefCell<AppState>>,
 ) -> Result<RtcPeerConnection, JsValue> {
-    let onicecandidate_callback =
-        Closure::wrap(
-            Box::new(move |ev: RtcPeerConnectionIceEvent| 
-                {
-                    let ws = ws.clone();
-                    let rc_state = rc_state.clone();
-                    send_ice_candidate(ws,rc_state,ev);
-                }
-            ) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>,
-        );
+    let onicecandidate_callback = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
+        let ws = ws.clone();
+        let rc_state = rc_state.clone();
+        send_ice_candidate(ws, rc_state, ev);
+    })
+        as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
     rtc_conn.set_onicecandidate(Some(onicecandidate_callback.as_ref().unchecked_ref()));
     onicecandidate_callback.forget();
     Ok(rtc_conn)
 }
-
 
 pub fn sleep(ms: i32) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, _| {
@@ -56,7 +51,7 @@ pub fn sleep(ms: i32) -> js_sys::Promise {
 pub fn send_ice_candidate(
     ws: WebSocket,
     rc_state: Rc<RefCell<AppState>>,
-    ev: RtcPeerConnectionIceEvent
+    ev: RtcPeerConnectionIceEvent,
 ) {
     match ev.candidate() {
         Some(candidate) => {
@@ -64,8 +59,8 @@ pub fn send_ice_candidate(
             let res = JSON::stringify(&json_obj_candidate).unwrap_throw();
 
             let js_ob = String::from(res.clone());
-            
-            let ws= ws.clone();
+
+            let ws = ws.clone();
             let rc_state = rc_state.clone();
 
             let state = rc_state.borrow();
@@ -75,10 +70,10 @@ pub fn send_ice_candidate(
                 Some(sid) => sid,
                 None => {
                     error!("No Session ID has been set yet");
-                    let sleep_promise= sleep(3000);
+                    let sleep_promise = sleep(3000);
                     wasm_bindgen_futures::spawn_local(async move {
                         let _ = wasm_bindgen_futures::JsFuture::from(sleep_promise).await;
-                        send_ice_candidate(ws,rc_state,ev);
+                        send_ice_candidate(ws, rc_state, ev);
                         error!("Session ID set now ???? ");
                     });
                     return;
@@ -97,7 +92,6 @@ pub fn send_ice_candidate(
         }
     }
 }
-
 
 pub async fn received_new_ice_candidate(
     candidate: String,

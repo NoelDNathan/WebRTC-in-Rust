@@ -191,12 +191,11 @@ impl PokerState {
             my_player.opened_cards = vec![];
         }
 
-
         // Reset shuffler/reshuffler indices
         self.current_shuffler = 0;
         self.current_reshuffler = 0;
         self.all_tokens_sent = false;
-        
+
         // Increment dealer for next round
         // if self.num_players_connected > 0 {
         //     let next_dealer = (self.current_dealer + 1) % (self.num_players_connected as u8);

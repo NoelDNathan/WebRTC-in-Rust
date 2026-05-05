@@ -562,7 +562,7 @@ fn handle_reveal_token_received(
 ) {
     let (card_mapping, deck, num_players_connected) = {
         let s_ro = state.borrow();
-        
+
         // Handle race condition where reveal token arrives after game reset
         if s_ro.deck.is_none() {
             log::warn!("Received reveal token but deck is not set. Ignoring message from potentially previous game.");
@@ -582,11 +582,11 @@ fn handle_reveal_token_received(
 
     // DEBUG: check indices
     if let Some(my_id_str) = &s.my_id {
-       if let Ok(my_id) = my_id_str.parse::<u8>() {
-           let idx1 = (my_id as usize) * 2 + 5;
-           let idx2 = (my_id as usize) * 2 + 1 + 5;
-           info!("DEBUG: handle_reveal_token_received - My ID: {}, Potential card indices: {} and {} (deck len: {})", my_id, idx1, idx2, deck.len());
-       }
+        if let Ok(my_id) = my_id_str.parse::<u8>() {
+            let idx1 = (my_id as usize) * 2 + 5;
+            let idx2 = (my_id as usize) * 2 + 1 + 5;
+            info!("DEBUG: handle_reveal_token_received - My ID: {}, Potential card indices: {} and {} (deck len: {})", my_id, idx1, idx2, deck.len());
+        }
     }
 
     info!("Got reveal token");
@@ -957,7 +957,7 @@ fn card_to_rank_suit(card: &ClassicPlayingCard) -> (u8, u8) {
         "8" => 6,
         "9" => 7,
         "10" => 8,
-        "J" => 9, // Jack
+        "J" => 9,  // Jack
         "Q" => 10, // Queen
         "K" => 11, // King
         "A" => 12, // Ace
@@ -973,36 +973,44 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
 
     // DEBUG: Log deck and mappings
     if let Some(deck) = &s.deck {
-        info!("DEBUG: deck by index: {:?}", deck.iter().map(|c| c.0.to_string()).collect::<Vec<_>>());
+        info!(
+            "DEBUG: deck by index: {:?}",
+            deck.iter().map(|c| c.0.to_string()).collect::<Vec<_>>()
+        );
     }
     if let Some(map) = &s.card_mapping {
         info!("DEBUG: card_mapping keys count: {}", map.len());
         for (k, v) in map.iter() {
-             info!("DEBUG: mapping {} -> {:?}", k.0.to_string(), v);
+            info!("DEBUG: mapping {} -> {:?}", k.0.to_string(), v);
         }
     }
 
-
     let num_players_connected = s.num_players_connected;
-    
+
     // Fixed number of players for the circuit
     let circuit_num_players = 4;
 
     // Collect all players' cards in order (by player ID)
     // Map: player_id -> (card1, card2)
-    let mut players_cards_map: HashMap<u8, (Option<ClassicPlayingCard>, Option<ClassicPlayingCard>)> = HashMap::new();
+    let mut players_cards_map: HashMap<
+        u8,
+        (Option<ClassicPlayingCard>, Option<ClassicPlayingCard>),
+    > = HashMap::new();
 
     // Add my player's cards
     if let Some(my_id_str) = &s.my_id {
         if let Ok(my_id) = my_id_str.parse::<u8>() {
-             players_cards_map.insert(my_id, (s.my_revealed_cards[0], s.my_revealed_cards[1]));
+            players_cards_map.insert(my_id, (s.my_revealed_cards[0], s.my_revealed_cards[1]));
         }
     }
 
     // Add other players' cards
     for (_, player_info) in s.players_info.iter() {
         if let Some(player_id) = player_info.id {
-             players_cards_map.insert(player_id, (player_info.opened_cards[0], player_info.opened_cards[1]));
+            players_cards_map.insert(
+                player_id,
+                (player_info.opened_cards[0], player_info.opened_cards[1]),
+            );
         }
     }
 
@@ -1012,10 +1020,13 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
         .iter()
         .filter_map(|c| *c)
         .collect();
-    
+
     // Ensure we have 5 community cards
     if community_cards.len() != 5 {
-        error!("Not enough community cards revealed: {}", community_cards.len());
+        error!(
+            "Not enough community cards revealed: {}",
+            community_cards.len()
+        );
         return;
     }
 
@@ -1023,85 +1034,88 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
     // The circuit expects:
     // signal input cardsRank[numPlayers][7];
     // signal input cardsSuit[numPlayers][7];
-    
-    let mut dummy_card = ClassicPlayingCard::new(
-        texas_holdem::Value::Two,
-        texas_holdem::Suite::Spade
-    ); // 2♠ (Rank 2, Suit 3) - standard lowest card, shouldn't matter for empty slots effectively
 
-    // Iterate for fixed number of players in circuit (4)
-    // We assume player IDs are approximate to 0..N-1, or we map them.
-    // However, the circuit just takes 4 hands. We need to fill them with active players first.
-    // The previous logic sorted by ID. We will do the same.
-    
-    let mut sorted_ids: Vec<u8> = players_cards_map.keys().cloned().collect();
-    sorted_ids.sort();
-    
+    let dummy_card = ClassicPlayingCard::new(texas_holdem::Value::Two, texas_holdem::Suite::Spade); // 2♠ - lowest possible card, used to fill empty chair slots so they never win
+
+    // Iterate over the fixed number of circuit slots. The circuit slot index MUST
+    // match the on-chain chair index, because the contract distributes prizes using
+    // `_scores[playerChair]`. Player IDs in WASM are set to the player's chair
+    // (see `setPlayerId(chair.toString())` in the frontend), so we map chair -> slot
+    // directly instead of compacting by sorted ids.
     for i in 0..circuit_num_players {
+        let chair_id = i as u8;
         let mut hand_cards = Vec::with_capacity(7);
-        
-        if i < sorted_ids.len() {
-            let player_id = sorted_ids[i];
-            if let Some((c1_opt, c2_opt)) = players_cards_map.get(&player_id) {
-                if let (Some(c1), Some(c2)) = (c1_opt, c2_opt) {
-                    hand_cards.push(*c1);
-                    hand_cards.push(*c2);
-                } else {
-                     // Should not happen if check_and_calculate_scores verifies all are revealed
-                     hand_cards.push(dummy_card);
-                     hand_cards.push(dummy_card);
-                }
+        let mut slot_has_player = false;
+
+        if let Some((c1_opt, c2_opt)) = players_cards_map.get(&chair_id) {
+            if let (Some(c1), Some(c2)) = (c1_opt, c2_opt) {
+                hand_cards.push(*c1);
+                hand_cards.push(*c2);
+                slot_has_player = true;
             } else {
+                // Should not happen if check_and_calculate_scores verifies all are revealed
                 hand_cards.push(dummy_card);
                 hand_cards.push(dummy_card);
             }
         } else {
-            // Empty player slot (if fewer than 4 players connected)
-            // Fill with dummy cards that won't win (e.g. 2s 3d 4h 5s 7c - low high card)
-            // Or just same dummy cards. 
+            // Empty chair: fill with dummy cards that produce the lowest possible score
             hand_cards.push(dummy_card);
             hand_cards.push(dummy_card);
         }
-        
-        // Add community cards to every hand
+
         for cc in &community_cards {
             hand_cards.push(*cc);
         }
 
-        // Sort by rank descending (using the corrected 0-12 rank values)
         hand_cards.sort_by(|a, b| {
             let (rank_a, _) = card_to_rank_suit(a);
             let (rank_b, _) = card_to_rank_suit(b);
             rank_b.cmp(&rank_a)
         });
-        
-        // Ensure we have 7 cards (should be true: 2 hole + 5 community)
-        // Now add to circuit inputs
+
         let mut numeric_inputs_rank = Vec::new();
         let mut numeric_inputs_suit = Vec::new();
-        for (j, card) in hand_cards.iter().enumerate() {
+        for card in hand_cards.iter() {
             let (rank, suit) = card_to_rank_suit(card);
             numeric_inputs_rank.push(rank);
             numeric_inputs_suit.push(suit);
-            
-            s.provers.prover_calculate_winners.add_input("cardsRank", rank as u64);
-            s.provers.prover_calculate_winners.add_input("cardsSuit", suit as u64);
+
+            s.provers
+                .prover_calculate_winners
+                .add_input("cardsRank", rank as u64);
+            s.provers
+                .prover_calculate_winners
+                .add_input("cardsSuit", suit as u64);
         }
-        
-        info!("Prepared inputs for player {} (circuit index {}): {:?}", 
-              if i < sorted_ids.len() { sorted_ids[i].to_string() } else { "EMPTY".to_string() }, 
-              i, hand_cards);
-        info!("DEBUG: Numeric inputs for circuit {} - Ranks: {:?}, Suits: {:?}", i, numeric_inputs_rank, numeric_inputs_suit);
+
+        info!(
+            "Prepared inputs for chair {} (circuit slot {}): {:?}",
+            if slot_has_player {
+                chair_id.to_string()
+            } else {
+                "EMPTY".to_string()
+            },
+            i,
+            hand_cards
+        );
+        info!(
+            "DEBUG: Numeric inputs for circuit slot {} - Ranks: {:?}, Suits: {:?}",
+            i, numeric_inputs_rank, numeric_inputs_suit
+        );
     }
 
     // Generate proof
     match s.provers.prover_calculate_winners.generate_proof() {
         Ok((public_inputs, proof)) => {
             info!("Successfully generated score calculation proof");
-            
+
             // DEBUG: Print public signals
             let public_strs: Vec<String> = public_inputs.iter().map(|fr| fr.to_string()).collect();
-            info!("DEBUG: public_signals (len={}): {:?}", public_strs.len(), public_strs);
+            info!(
+                "DEBUG: public_signals (len={}): {:?}",
+                public_strs.len(),
+                public_strs
+            );
 
             let (public_js, proof_js) = format_proof_for_js(&public_inputs, &proof);
 
@@ -1113,7 +1127,11 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
             } else {
                 info!("Successfully sent scores to frontend");
             }
-            if let Err(e) = s.provers.prover_calculate_winners.reset_calculate_winners_builder() {
+            if let Err(e) = s
+                .provers
+                .prover_calculate_winners
+                .reset_calculate_winners_builder()
+            {
                 error!("Failed to reset calculate_winners builder: {:?}", e);
             }
         }
@@ -1371,7 +1389,7 @@ fn handle_reveal_token_community_cards_received(
     // Take immutable snapshot of fields needed across mutable operations
     let (pp, deck, card_mapping) = {
         let s_ro = state.borrow();
-        
+
         // Handle race condition where reveal token arrives after game reset
         if s_ro.deck.is_none() {
             log::warn!("Received community card reveal token but deck is not set. Ignoring message from potentially previous game.");
@@ -2265,8 +2283,38 @@ fn process_reshuffle_verification(
     }
 }
 
-#[allow(non_snake_case)]
+/// Verifies a shuffle proof and advances the shuffle round.
+///
+/// Invariant: any value taken out of `s` (currently `deck` and `my_player`)
+/// MUST be put back before this function returns, no matter which path the
+/// inner logic exits through (success, verification error, or `?` early-return
+/// from any helper). Otherwise a single transient failure would corrupt the
+/// state for the rest of the session, causing the next shuffle message to
+/// panic with `Deck should be set` / `Player should be initialized`.
+///
+/// The pattern used here is "take + always-restore": the body is delegated to
+/// `process_shuffle_verification_body`, which receives the taken values by
+/// `&mut`. Whatever the body returns, the outer function unconditionally
+/// reinserts the values into `s`.
 fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
+    let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
+    let mut deck = s.deck.take().expect(ERROR_DECK_NOT_SET);
+
+    let outcome = process_shuffle_verification_body(s, &mut player, &mut deck);
+
+    // Unconditional restoration: this MUST run on every exit path.
+    s.my_player = Some(player);
+    s.deck = Some(deck);
+
+    outcome
+}
+
+#[allow(non_snake_case)]
+fn process_shuffle_verification_body(
+    s: &mut PokerState,
+    player: &mut InternalPlayer,
+    deck: &mut Vec<MaskedCard>,
+) -> Result<(), Box<dyn Error>> {
     let public_strings = deserialize_chunks(&s.public_shuffle_bytes)?;
     let public_fr: Vec<Bn254Fr> = public_strings
         .iter()
@@ -2284,207 +2332,191 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
 
     let proof = deserialize_proof(&s.proof_shuffle_bytes)?;
     let pp = s.pp.clone();
-    let joint_pk = s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET);
-    let mut deck = s.deck.take().expect(ERROR_DECK_NOT_SET);
-
-    let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
+    let joint_pk = s
+        .joint_pk
+        .as_ref()
+        .expect(ERROR_JOINT_PK_NOT_SET)
+        .clone();
     let mut rng = StdRng::from_entropy();
 
-    match CardProtocol::verify_shuffle_remask2(
+    let shuffled_deck = match CardProtocol::verify_shuffle_remask2(
         &mut s.provers.prover_shuffle,
         &pp,
-        joint_pk,
-        &deck,
+        &joint_pk,
+        deck,
         public_fr,
         proof,
     ) {
-        Ok(shuffled_deck) => {
-            s.deck = Some(shuffled_deck.clone());
-            let shuffled_deck_clone = shuffled_deck.clone();
-            deck = shuffled_deck_clone;
-            s.current_shuffler += 1;
-
-            if s.current_shuffler
-                == s.my_id
-                    .as_ref()
-                    .expect(ERROR_PLAYER_ID_NOT_SET)
-                    .parse::<u8>()
-                    .unwrap()
-            {
-                // Call shuffle_remask_and_send as before
-                match shuffle_remask_and_send(s, &shuffled_deck) {
-                    Ok(new_deck) => {
-                        s.deck = Some(new_deck.clone());
-                        deck = new_deck.clone();
-                    }
-                    Err(e) => {
-                        error!("Error in shuffle verification: {:?}", e);
-                    }
-                }
-            }
-
-            if s.current_shuffler == s.num_players_connected as u8 - 1 {
-                s.current_shuffler = 0;
-                info!("All players shuffled, revealing cards");
-
-                // Enviar cartas encriptadas al frontend
-                send_encrypted_cards(&s);
-
-                let id = s
-                    .my_id
-                    .as_ref()
-                    .expect(ERROR_PLAYER_ID_NOT_SET)
-                    .parse::<u8>()
-                    .unwrap();
-
-                player.receive_card(deck[id as usize * 2 + 5]);
-                player.receive_card(deck[id as usize * 2 + 1 + 5]);
-
-                for i in 0..s.num_players_connected {
-                    if i == id as usize {
-                        continue;
-                    }
-                    let card1 = deck[i * 2 + 5];
-                    let card2 = deck[i * 2 + 5 + 1];
-
-                    let reveal_token1: (RevealToken, RevealProof, PublicKey) =
-                        player.compute_reveal_token(&mut rng, &pp, &card1)?;
-                    let reveal_token2: (RevealToken, RevealProof, PublicKey) =
-                        player.compute_reveal_token(&mut rng, &pp, &card2)?;
-                    let reveal_token1_bytes = serialize_canonical(&reveal_token1)?;
-                    let reveal_token2_bytes = serialize_canonical(&reveal_token2)?;
-
-                    let verify_reveal_token_clone = s.verify_reveal_token.clone();
-
-                    let card1_string = card1.0.to_string();
-                    let card2_string = card2.0.to_string();
-                    let generator_string = pp.enc_parameters.generator.to_string();
-
-                    let player_pk_string = player.pk.to_string();
-
-                    let token1 = reveal_token1.0;
-                    let token2 = reveal_token2.0;
-
-                    let proof1 = reveal_token1.1;
-                    let proof2 = reveal_token2.1;
-
-                    let G_card1 = JsValue::from_str(&format!("{:?}", card1_string));
-                    let G_card2 = JsValue::from_str(&format!("{:?}", card2_string));
-
-                    let H = JsValue::from_str(&format!("{:?}", generator_string));
-
-                    let statement1_card1 =
-                        JsValue::from_str(&format!("{:?}", token1.0.to_string()));
-                    let statement1_card2 =
-                        JsValue::from_str(&format!("{:?}", token2.0.to_string()));
-
-                    let statement2 = JsValue::from_str(&format!("{:?}", player_pk_string));
-
-                    let A_card1 = JsValue::from_str(&format!("{:?}", proof1.a.to_string()));
-                    let B_card1 = JsValue::from_str(&format!("{:?}", proof1.b.to_string()));
-                    let r_card1 = JsValue::from_str(&format!("{:?}", proof1.r.to_string()));
-
-                    let A_card2 = JsValue::from_str(&format!("{:?}", proof2.a.to_string()));
-                    let B_card2 = JsValue::from_str(&format!("{:?}", proof2.b.to_string()));
-                    let r_card2 = JsValue::from_str(&format!("{:?}", proof2.r.to_string()));
-                    let receiver_chair = JsValue::from_str(&format!("{:?}", i));
-
-                    let args = vec![
-                        G_card1,
-                        G_card2,
-                        H,
-                        statement1_card1,
-                        statement1_card2,
-                        statement2,
-                        A_card1,
-                        B_card1,
-                        A_card2,
-                        B_card2,
-                        r_card1,
-                        r_card2,
-                        receiver_chair,
-                    ];
-
-                    let args_array = js_sys::Array::new();
-                    for arg in args {
-                        args_array.push(&arg);
-                    }
-                    info!("args_array: {:?}", args_array);
-                    info!("args array length: {:?}", args_array.length());
-                    if let Err(e) = verify_reveal_token_clone.call1(&JsValue::NULL, &args_array) {
-                        error!("verify_reveal_token callback failed: {:?}", e);
-                    }
-
-                    let new_token1 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
-                        &reveal_token1_bytes,
-                    )?;
-                    let new_token2 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
-                        &reveal_token2_bytes,
-                    )?;
-
-                    // Wrap the proofs in Rc
-                    let new_token1_rc = (new_token1.0, Rc::new(new_token1.1), new_token1.2);
-                    let new_token2_rc = (new_token2.0, Rc::new(new_token2.1), new_token2.2);
-
-                    info!("Pushing reveal tokens to player {}", i);
-
-                    match find_player_by_id(&mut s.players_info, i as u8) {
-                        Some((_, player_info)) => {
-                            player_info.cards = [Some(card1), Some(card2)];
-                            player_info.reveal_tokens[0].push(new_token1_rc);
-                            player_info.reveal_tokens[1].push(new_token2_rc);
-                        }
-                        None => {
-                            error!("Player with id {} not found", i);
-                        }
-                    }
-
-                    if DEBUG_MODE {
-                        info!(
-                            "send Reveal token 1 from {:?} to {:?}: {:?}",
-                            id,
-                            i,
-                            reveal_token1.0 .0.to_string()
-                        );
-                        info!(
-                            "send Reveal token 2 from {:?} to {:?}: {:?}",
-                            id,
-                            i,
-                            reveal_token2.0 .0.to_string()
-                        );
-                    }
-
-                    let reveal_token1_bytes_clone = reveal_token1_bytes.clone();
-                    let reveal_token2_bytes_clone = reveal_token2_bytes.clone();
-                    let message = ProtocolMessage::RevealToken(
-                        i as u8,
-                        reveal_token1_bytes_clone,
-                        reveal_token2_bytes_clone,
-                    );
-                    if let Err(e) = send_protocol_message(s, message) {
-                        error!("Error sending reveal token: {:?}", e);
-                    }
-                }
-
-                // Después de enviar todos los tokens, verificar si se pueden enviar al frontend
-                // Esta función verifica ambas condiciones (recibidos y enviados) y solo envía una vez
-                check_and_send_all_tokens(s);
-            }
-            info!("Shuffle verified");
-            // Restore the player after all operations are complete
-            s.public_shuffle_bytes.clear();
-            s.proof_shuffle_bytes.clear();
-            s.is_all_public_shuffle_bytes_received = false;
-            s.my_player = Some(player);
-            Ok(())
-        }
+        Ok(shuffled_deck) => shuffled_deck,
         Err(e) => {
             error!("Error verifying shuffle remask: {:?}", e);
-            // Restore the player even in error case
-            s.my_player = Some(player);
-            Err(Box::new(e))
+            return Err(Box::new(e));
+        }
+    };
+
+    *deck = shuffled_deck.clone();
+    s.current_shuffler += 1;
+
+    let my_id = s
+        .my_id
+        .as_ref()
+        .expect(ERROR_PLAYER_ID_NOT_SET)
+        .parse::<u8>()
+        .unwrap();
+
+    if s.current_shuffler == my_id {
+        match shuffle_remask_and_send(s, &shuffled_deck) {
+            Ok(new_deck) => {
+                *deck = new_deck;
+            }
+            Err(e) => {
+                error!("Error in shuffle verification: {:?}", e);
+            }
         }
     }
+
+    if s.current_shuffler == s.num_players_connected as u8 - 1 {
+        s.current_shuffler = 0;
+        info!("All players shuffled, revealing cards");
+
+        send_encrypted_cards(&s);
+
+        player.receive_card(deck[my_id as usize * 2 + 5]);
+        player.receive_card(deck[my_id as usize * 2 + 1 + 5]);
+
+        for i in 0..s.num_players_connected {
+            if i == my_id as usize {
+                continue;
+            }
+            let card1 = deck[i * 2 + 5];
+            let card2 = deck[i * 2 + 5 + 1];
+
+            let reveal_token1: (RevealToken, RevealProof, PublicKey) =
+                player.compute_reveal_token(&mut rng, &pp, &card1)?;
+            let reveal_token2: (RevealToken, RevealProof, PublicKey) =
+                player.compute_reveal_token(&mut rng, &pp, &card2)?;
+            let reveal_token1_bytes = serialize_canonical(&reveal_token1)?;
+            let reveal_token2_bytes = serialize_canonical(&reveal_token2)?;
+
+            let verify_reveal_token_clone = s.verify_reveal_token.clone();
+
+            let card1_string = card1.0.to_string();
+            let card2_string = card2.0.to_string();
+            let generator_string = pp.enc_parameters.generator.to_string();
+
+            let player_pk_string = player.pk.to_string();
+
+            let token1 = reveal_token1.0;
+            let token2 = reveal_token2.0;
+
+            let proof1 = reveal_token1.1;
+            let proof2 = reveal_token2.1;
+
+            let G_card1 = JsValue::from_str(&format!("{:?}", card1_string));
+            let G_card2 = JsValue::from_str(&format!("{:?}", card2_string));
+
+            let H = JsValue::from_str(&format!("{:?}", generator_string));
+
+            let statement1_card1 =
+                JsValue::from_str(&format!("{:?}", token1.0.to_string()));
+            let statement1_card2 =
+                JsValue::from_str(&format!("{:?}", token2.0.to_string()));
+
+            let statement2 = JsValue::from_str(&format!("{:?}", player_pk_string));
+
+            let A_card1 = JsValue::from_str(&format!("{:?}", proof1.a.to_string()));
+            let B_card1 = JsValue::from_str(&format!("{:?}", proof1.b.to_string()));
+            let r_card1 = JsValue::from_str(&format!("{:?}", proof1.r.to_string()));
+
+            let A_card2 = JsValue::from_str(&format!("{:?}", proof2.a.to_string()));
+            let B_card2 = JsValue::from_str(&format!("{:?}", proof2.b.to_string()));
+            let r_card2 = JsValue::from_str(&format!("{:?}", proof2.r.to_string()));
+            let receiver_chair = JsValue::from_str(&format!("{:?}", i));
+
+            let args = vec![
+                G_card1,
+                G_card2,
+                H,
+                statement1_card1,
+                statement1_card2,
+                statement2,
+                A_card1,
+                B_card1,
+                A_card2,
+                B_card2,
+                r_card1,
+                r_card2,
+                receiver_chair,
+            ];
+
+            let args_array = js_sys::Array::new();
+            for arg in args {
+                args_array.push(&arg);
+            }
+            info!("args_array: {:?}", args_array);
+            info!("args array length: {:?}", args_array.length());
+            if let Err(e) = verify_reveal_token_clone.call1(&JsValue::NULL, &args_array) {
+                error!("verify_reveal_token callback failed: {:?}", e);
+            }
+
+            let new_token1 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                &reveal_token1_bytes,
+            )?;
+            let new_token2 = deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(
+                &reveal_token2_bytes,
+            )?;
+
+            let new_token1_rc = (new_token1.0, Rc::new(new_token1.1), new_token1.2);
+            let new_token2_rc = (new_token2.0, Rc::new(new_token2.1), new_token2.2);
+
+            info!("Pushing reveal tokens to player {}", i);
+
+            match find_player_by_id(&mut s.players_info, i as u8) {
+                Some((_, player_info)) => {
+                    player_info.cards = [Some(card1), Some(card2)];
+                    player_info.reveal_tokens[0].push(new_token1_rc);
+                    player_info.reveal_tokens[1].push(new_token2_rc);
+                }
+                None => {
+                    error!("Player with id {} not found", i);
+                }
+            }
+
+            if DEBUG_MODE {
+                info!(
+                    "send Reveal token 1 from {:?} to {:?}: {:?}",
+                    my_id,
+                    i,
+                    reveal_token1.0 .0.to_string()
+                );
+                info!(
+                    "send Reveal token 2 from {:?} to {:?}: {:?}",
+                    my_id,
+                    i,
+                    reveal_token2.0 .0.to_string()
+                );
+            }
+
+            let reveal_token1_bytes_clone = reveal_token1_bytes.clone();
+            let reveal_token2_bytes_clone = reveal_token2_bytes.clone();
+            let message = ProtocolMessage::RevealToken(
+                i as u8,
+                reveal_token1_bytes_clone,
+                reveal_token2_bytes_clone,
+            );
+            if let Err(e) = send_protocol_message(s, message) {
+                error!("Error sending reveal token: {:?}", e);
+            }
+        }
+
+        check_and_send_all_tokens(s);
+    }
+
+    info!("Shuffle verified");
+    s.public_shuffle_bytes.clear();
+    s.proof_shuffle_bytes.clear();
+    s.is_all_public_shuffle_bytes_received = false;
+    Ok(())
 }
 
 pub fn verify_remask_for_reshuffle(
