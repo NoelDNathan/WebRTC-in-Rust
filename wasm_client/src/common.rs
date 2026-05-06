@@ -27,6 +27,7 @@ use web_sys::{
 };
 
 use crate::poker_state::{PokerState, Provers};
+use crate::snapshot::PokerCryptoSnapshot;
 use shared_protocol::{SessionID, SignalEnum, UserID};
 use zk_reshuffle::CircomProver;
 
@@ -194,6 +195,35 @@ pub fn poker_reset_for_new_game() {
     } else {
         error!("poker_reset_for_new_game: no state");
     }
+}
+
+#[wasm_bindgen]
+pub fn export_poker_snapshot() -> Result<String, JsValue> {
+    let state = get_poker_state().ok_or_else(|| JsValue::from_str("Poker state not initialized"))?;
+    let snapshot = {
+        let state_ref = state.borrow();
+        PokerCryptoSnapshot::from_state(&state_ref)
+            .map_err(|e| JsValue::from_str(&format!("Failed to export poker snapshot: {}", e)))?
+    };
+
+    serde_json::to_string(&snapshot)
+        .map_err(|e| JsValue::from_str(&format!("Failed to serialize poker snapshot: {}", e)))
+}
+
+#[wasm_bindgen]
+pub fn restore_poker_snapshot(snapshot_json: String) -> Result<(), JsValue> {
+    let snapshot: PokerCryptoSnapshot = serde_json::from_str(&snapshot_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse poker snapshot: {}", e)))?;
+    let state = get_poker_state().ok_or_else(|| JsValue::from_str("Poker state not initialized"))?;
+
+    {
+        let mut state_ref = state.borrow_mut();
+        snapshot
+            .apply_to_state(&mut state_ref)
+            .map_err(|e| JsValue::from_str(&format!("Failed to restore poker snapshot: {}", e)))?;
+    }
+
+    Ok(())
 }
 
 // ============================================
@@ -442,6 +472,30 @@ pub fn get_poker_state_json() -> Result<JsValue, JsValue> {
             &obj,
             &"isReshuffling".into(),
             &JsValue::from_bool(state.is_reshuffling),
+        )?;
+        Reflect::set(
+            &obj,
+            &"myRevealedCards".into(),
+            &JsValue::from_serde(
+                &state
+                    .my_revealed_cards
+                    .iter()
+                    .map(|card| card.map(crate::snapshot::CardSnapshot::from_card))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?,
+        )?;
+        Reflect::set(
+            &obj,
+            &"revealedCommunityCards".into(),
+            &JsValue::from_serde(
+                &state
+                    .revealed_community_cards
+                    .iter()
+                    .map(|card| card.map(crate::snapshot::CardSnapshot::from_card))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?,
         )?;
 
         Ok(obj.into())

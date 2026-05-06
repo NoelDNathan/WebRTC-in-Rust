@@ -3,6 +3,7 @@ mod handle_frontend_messages;
 mod handle_poker_messages;
 mod ice;
 mod poker_state;
+mod snapshot;
 mod sdp;
 mod utils;
 mod websockets;
@@ -20,7 +21,7 @@ use sdp::{create_sdp_offer, receive_sdp_answer, receive_sdp_offer_send_answer};
 use utils::set_panic_hook;
 use websockets::open_web_socket;
 
-//#[cfg(all(target_arch = "wasm32", not(doc), target_feature = "atomics"))]
+#[cfg(feature = "rayon")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 #[wasm_bindgen(start)]

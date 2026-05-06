@@ -268,25 +268,40 @@ fn handle_public_key_info_received(
                         player_info.id = Some(new_player_id);
                         player_info.public_key = Some(pk_val.clone());
                         player_info.proof_key = Some(proof_val.clone());
-                        let set_player_info_clone = s.set_player_info.clone();
-
-                        let r = proof_val.random_commit.to_string();
-                        let s = proof_val.opening.to_string();
-
-                        let _ = set_player_info_clone.call5(
-                            &JsValue::NULL,
-                            &JsValue::from_str(&name),
-                            &JsValue::from_str(&new_player_id.to_string()),
-                            &JsValue::from_str(&pk_val.to_string()),
-                            &JsValue::from_str(&r),
-                            &JsValue::from_str(&s),
-                        );
                     } else {
                         warn!(
-                            "Attempted to update player {}, but entry was not found. Skipping update.",
+                            "Player entry {} was missing when public key arrived. Creating it now.",
                             peer_id
                         );
+                        s.players_info.insert(
+                            peer_id,
+                            PlayerInfo {
+                                peer_connection: peer_connection.clone(),
+                                data_channel: data_channel.clone(),
+                                name: Some(name.clone()),
+                                id: Some(new_player_id),
+                                public_key: Some(pk_val.clone()),
+                                proof_key: Some(proof_val.clone()),
+                                cards: [None, None],
+                                cards_public: [None, None],
+                                opened_cards: [None, None],
+                                reveal_tokens: [vec![], vec![]],
+                            },
+                        );
                     }
+
+                    let set_player_info_clone = s.set_player_info.clone();
+                    let r = proof_val.random_commit.to_string();
+                    let opening = proof_val.opening.to_string();
+
+                    let _ = set_player_info_clone.call5(
+                        &JsValue::NULL,
+                        &JsValue::from_str(&name),
+                        &JsValue::from_str(&new_player_id.to_string()),
+                        &JsValue::from_str(&pk_val.to_string()),
+                        &JsValue::from_str(&r),
+                        &JsValue::from_str(&opening),
+                    );
                 }
                 Err(e) => error!("Error verifying proof key ownership: {:?}", e),
             }
@@ -453,6 +468,7 @@ fn handle_shuffled_and_remasked_cards_received(
             if s.current_shuffler == my_id {
                 let shuffle_deck = shuffle_remask_and_send(&mut *s, &remasked_cards)
                     .expect(ERROR_SHUFFLE_REMASK_FAILDED);
+                current_deck = shuffle_deck.clone();
                 s.deck = Some(shuffle_deck);
             }
 
@@ -464,8 +480,8 @@ fn handle_shuffled_and_remasked_cards_received(
                     s.current_shuffler = 0;
                     info!("All players shuffled, revealing cards");
 
-                    // Enviar cartas encriptadas al frontend
-                    send_encrypted_cards(&s);
+                    // Enviar cartas encriptadas al frontend desde el deck local ya actualizado.
+                    send_encrypted_cards(&current_deck, &s.set_encrypted_cards);
 
                     let my_id = s
                         .my_id
@@ -1343,14 +1359,11 @@ fn send_all_tokens(s: &PokerState) {
 }
 
 /// Send encrypted cards (deck) to frontend after all players have shuffled
-fn send_encrypted_cards(s: &PokerState) {
-    let deck = match &s.deck {
-        Some(deck) => deck,
-        None => {
-            error!("Deck not set, cannot send encrypted cards");
-            return;
-        }
-    };
+fn send_encrypted_cards(deck: &[MaskedCard], set_encrypted_cards: &js_sys::Function) {
+    if deck.is_empty() {
+        error!("Deck is empty, cannot send encrypted cards");
+        return;
+    }
 
     // Crear un array con todas las cartas encriptadas
     let cards_array = js_sys::Array::new();
@@ -1371,7 +1384,7 @@ fn send_encrypted_cards(s: &PokerState) {
     }
 
     // Llamar al callback
-    if let Err(e) = s.set_encrypted_cards.call1(&JsValue::NULL, &cards_array) {
+    if let Err(e) = set_encrypted_cards.call1(&JsValue::NULL, &cards_array) {
         error!("set_encrypted_cards callback failed: {:?}", e);
     } else {
         info!(
@@ -2379,7 +2392,7 @@ fn process_shuffle_verification_body(
         s.current_shuffler = 0;
         info!("All players shuffled, revealing cards");
 
-        send_encrypted_cards(&s);
+        send_encrypted_cards(deck, &s.set_encrypted_cards);
 
         player.receive_card(deck[my_id as usize * 2 + 5]);
         player.receive_card(deck[my_id as usize * 2 + 1 + 5]);
