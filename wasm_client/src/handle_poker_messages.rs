@@ -1637,6 +1637,7 @@ fn handle_zk_proof_shuffle_chunk_received(
                     }
                     Err(e) => {
                         error!("Error in shuffle verification: {:?}", e);
+                        clear_pending_shuffle_verification(&mut *s);
                     }
                 }
             }
@@ -1655,11 +1656,18 @@ fn handle_zk_proof_shuffle_proof_received(state: Rc<RefCell<PokerState>>, proof_
             }
             Err(e) => {
                 error!("Error in shuffle verification: {:?}", e);
+                clear_pending_shuffle_verification(&mut *s);
             }
         }
     } else {
         info!("Not all public shuffle bytes received yet");
     }
+}
+
+fn clear_pending_shuffle_verification(s: &mut PokerState) {
+    s.public_shuffle_bytes.clear();
+    s.proof_shuffle_bytes.clear();
+    s.is_all_public_shuffle_bytes_received = false;
 }
 
 // -----------------------------HELPER FUNCTIONS-----------------------------
@@ -2310,6 +2318,38 @@ fn process_reshuffle_verification(
 /// `&mut`. Whatever the body returns, the outer function unconditionally
 /// reinserts the values into `s`.
 fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
+    if s.deck.is_none() {
+        warn!(
+            "Received complete shuffle verification while deck is not set. Ignoring stale shuffle message."
+        );
+        clear_pending_shuffle_verification(s);
+        return Ok(());
+    }
+
+    if s.my_player.is_none() {
+        warn!(
+            "Received complete shuffle verification while player is not initialized. Ignoring stale shuffle message."
+        );
+        clear_pending_shuffle_verification(s);
+        return Ok(());
+    }
+
+    if s.joint_pk.is_none() {
+        warn!(
+            "Received complete shuffle verification while joint key is not set. Ignoring stale shuffle message."
+        );
+        clear_pending_shuffle_verification(s);
+        return Ok(());
+    }
+
+    if s.my_id.is_none() {
+        warn!(
+            "Received complete shuffle verification while player id is not set. Ignoring stale shuffle message."
+        );
+        clear_pending_shuffle_verification(s);
+        return Ok(());
+    }
+
     let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
     let mut deck = s.deck.take().expect(ERROR_DECK_NOT_SET);
 
@@ -2526,9 +2566,7 @@ fn process_shuffle_verification_body(
     }
 
     info!("Shuffle verified");
-    s.public_shuffle_bytes.clear();
-    s.proof_shuffle_bytes.clear();
-    s.is_all_public_shuffle_bytes_received = false;
+    clear_pending_shuffle_verification(s);
     Ok(())
 }
 
