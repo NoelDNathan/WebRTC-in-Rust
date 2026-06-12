@@ -123,9 +123,9 @@ pub fn poker_change_phase(phase: String) {
             "Flop" => GamePhase::Flop,
             "Turn" => GamePhase::Turn,
             "River" => GamePhase::River,
-            "AllInPreflop" => GamePhase::AllInPreflop,
-            "AllInFlop" => GamePhase::AllInFlop,
-            "AllInTurn" => GamePhase::AllInTurn,
+            "AllInPreflop" | "All-in Preflop" => GamePhase::AllInPreflop,
+            "AllInFlop" | "All-in Flop" => GamePhase::AllInFlop,
+            "AllInTurn" | "All-in Turn" => GamePhase::AllInTurn,
             "Showdown" => GamePhase::Showdown,
             other => {
                 log::error!("Invalid phase: {}", other);
@@ -465,6 +465,11 @@ pub fn get_poker_state_json() -> Result<JsValue, JsValue> {
         )?;
         Reflect::set(
             &obj,
+            &"connectedPeers".into(),
+            &JsValue::from_f64(state.players_info.len() as f64),
+        )?;
+        Reflect::set(
+            &obj,
             &"currentDealer".into(),
             &JsValue::from_f64(state.current_dealer as f64),
         )?;
@@ -617,30 +622,34 @@ fn setup_data_channel_callbacks(
 
         // Increment num_players_connected when data channel opens
         if let Some(poker_state) = get_poker_state() {
-            let mut s = poker_state.borrow_mut();
+            {
+                let mut s = poker_state.borrow_mut();
 
-            // Add player to players_connected with basic info
-            let peer_id = get_peer_id(dc_onopen.clone());
-            info!("Peer id: {:?}", peer_id);
-            let temp_player_info = PlayerInfo {
-                peer_connection: peer_onopen.clone(),
-                data_channel: dc_onopen.clone(),
-                name: None,
-                id: None,
-                public_key: None,
-                proof_key: None,
-                cards: [None, None],
-                cards_public: [None, None],
-                opened_cards: [None, None],
-                reveal_tokens: [vec![], vec![]],
-            };
+                // Add player to players_connected with basic info
+                let peer_id = get_peer_id(dc_onopen.clone());
+                info!("Peer id: {:?}", peer_id);
+                let temp_player_info = PlayerInfo {
+                    peer_connection: peer_onopen.clone(),
+                    data_channel: dc_onopen.clone(),
+                    name: None,
+                    id: None,
+                    public_key: None,
+                    proof_key: None,
+                    cards: [None, None],
+                    cards_public: [None, None],
+                    opened_cards: [None, None],
+                    reveal_tokens: [vec![], vec![]],
+                };
 
-            s.players_info.insert(peer_id, temp_player_info);
-            info!(
-                "Player connected via data channel. Total players: {}",
-                s.players_info.len()
-            );
-            info!("Players info: {:?}", s.players_info);
+                s.players_info.insert(peer_id, temp_player_info);
+                info!(
+                    "Player connected via data channel. Total players: {}",
+                    s.players_info.len()
+                );
+                info!("Players info: {:?}", s.players_info);
+            }
+
+            notify_poker_state_changed();
         }
     }) as Box<dyn FnMut(JsValue)>);
 
@@ -764,6 +773,23 @@ pub(crate) fn notify_websocket_error(error_message: &str) {
     });
 }
 
+pub(crate) fn notify_poker_state_changed() {
+    let state_json = match get_poker_state_json() {
+        Ok(value) => value,
+        Err(e) => {
+            error!("Failed to serialize poker state for callback: {:?}", e);
+            return;
+        }
+    };
+
+    REACT_CALLBACKS.with(|callbacks| {
+        let cbs = callbacks.borrow();
+        if let Some(ref callback) = cbs.on_poker_state_changed {
+            let _ = callback.call1(&JsValue::NULL, &state_json);
+        }
+    });
+}
+
 // ============================================
 // EXISTING FUNCTIONS (KEPT FOR COMPATIBILITY)
 // ============================================
@@ -811,6 +837,8 @@ fn create_poker_state() -> PokerState {
         pk_proof_info_array: Vec::new(),
         joint_pk: None,
         card_mapping: None,
+        pending_initial_cards: None,
+        pending_public_key_infos: Vec::new(),
         deck: None,
         provers: provers,
         current_dealer: 0,

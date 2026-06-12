@@ -215,6 +215,30 @@ pub fn handle_poker_message(
 
 // ----------------------------- HANDLERS FOR EACH PROTOCOL MESSAGE-----------------------------
 
+pub(crate) fn process_pending_public_key_infos(state: Rc<RefCell<PokerState>>) {
+    let pending_public_key_infos = {
+        let mut s = state.borrow_mut();
+        if s.my_id.is_none() || s.my_player.is_none() || s.pending_public_key_infos.is_empty() {
+            return;
+        }
+
+        info!(
+            "Processing {} pending public key info messages",
+            s.pending_public_key_infos.len()
+        );
+        std::mem::take(&mut s.pending_public_key_infos)
+    };
+
+    for (peer_connection, data_channel, public_key_info) in pending_public_key_infos {
+        handle_public_key_info_received(
+            state.clone(),
+            peer_connection,
+            data_channel,
+            public_key_info,
+        );
+    }
+}
+
 fn handle_public_key_info_received(
     state: Rc<RefCell<PokerState>>,
     peer_connection: RtcPeerConnection,
@@ -232,6 +256,18 @@ fn handle_public_key_info_received(
     // First, collect all the data we need and update the state
     let (is_dealer_check, should_deal_cards) = {
         let mut s = state.borrow_mut();
+
+        if s.my_id.is_none() || s.my_player.is_none() {
+            info!(
+                "Local player is not ready yet; queuing received public key info from peer"
+            );
+            s.pending_public_key_infos.push((
+                peer_connection.clone(),
+                data_channel.clone(),
+                public_key_info,
+            ));
+            return;
+        }
 
         match deserialize_canonical::<PublicKey>(&public_key_info.public_key) {
             Ok(decoded_pk) => pk = Some(decoded_pk),
@@ -330,6 +366,29 @@ fn handle_public_key_info_received(
                         );
                         info!("Joint public key: {:?}", aggregate_key.to_string());
 
+                        if s.deck.is_none() {
+                            if let Some(pending_cards) = s.pending_initial_cards.take() {
+                                match initialize_deck_from_cards(&mut *s, &pending_cards) {
+                                    Ok(()) => {
+                                        info!(
+                                            "Initialized pending encoded cards after joint public key became available"
+                                        );
+                                        try_process_pending_shuffle_verification(
+                                            &mut *s,
+                                            "joint public key initialized",
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to initialize pending encoded cards: {:?}",
+                                            e
+                                        );
+                                        s.pending_initial_cards = Some(pending_cards);
+                                    }
+                                }
+                            }
+                        }
+
                         // Return info needed for dealt_cards, but release borrow first
                         (is_dealer(current_dealer, &player_id), true)
                     }
@@ -378,6 +437,62 @@ fn handle_public_key_info_received(
 //     }
 // }
 
+fn initialize_deck_from_cards(
+    s: &mut PokerState,
+    list_of_cards: &[Card],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let joint_pk = s
+        .joint_pk
+        .as_ref()
+        .ok_or_else(|| ERROR_JOINT_PK_NOT_SET.to_string())?;
+
+    let mut rng = StdRng::from_entropy();
+    let deck_and_proofs: Vec<(MaskedCard, RemaskingProof)> = list_of_cards
+        .iter()
+        .map(|card| CardProtocol::mask(&mut rng, &s.pp, joint_pk, card, &Scalar::one()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    s.deck = Some(
+        deck_and_proofs
+            .iter()
+            .map(|x| x.0)
+            .collect::<Vec<MaskedCard>>(),
+    );
+
+    Ok(())
+}
+
+fn try_process_pending_shuffle_verification(s: &mut PokerState, reason: &str) {
+    if !s.is_all_public_shuffle_bytes_received || s.proof_shuffle_bytes.is_empty() {
+        return;
+    }
+
+    if s.deck.is_none() {
+        warn!(
+            "Deferring shuffle verification after {} because deck is not set yet",
+            reason
+        );
+        return;
+    }
+
+    if s.my_player.is_none() {
+        warn!(
+            "Deferring shuffle verification after {} because player is not initialized yet",
+            reason
+        );
+        return;
+    }
+
+    match process_shuffle_verification(s) {
+        Ok(_) => {
+            info!("Shuffle verification completed");
+        }
+        Err(e) => {
+            error!("Error in shuffle verification: {:?}", e);
+        }
+    }
+}
+
 fn handle_encoded_cards_received(
     state: Rc<RefCell<PokerState>>,
     encoded_cards: Vec<u8>,
@@ -397,21 +512,16 @@ fn handle_encoded_cards_received(
     let _ = set_initial_deck_clone.call1(&JsValue::NULL, &cards_str);
 
     s.card_mapping = Some(encode_cards_ext(list_of_cards.clone()));
-    let mut rng = StdRng::from_entropy();
-    if let Some(pk) = &s.joint_pk {
-        let deck_and_proofs: Vec<(MaskedCard, RemaskingProof)> = list_of_cards
-            .iter()
-            .map(|card| CardProtocol::mask(&mut rng, &s.pp, pk, &card, &Scalar::one()))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        s.deck = Some(
-            deck_and_proofs
-                .iter()
-                .map(|x| x.0)
-                .collect::<Vec<MaskedCard>>(),
-        );
+    if s.joint_pk.is_some() {
+        initialize_deck_from_cards(&mut *s, &list_of_cards)?;
+        s.pending_initial_cards = None;
+        try_process_pending_shuffle_verification(&mut *s, "encoded cards received");
     } else {
-        error!("{}", ERROR_JOINT_PK_NOT_SET);
+        warn!(
+            "{}; storing encoded cards until the joint key is available",
+            ERROR_JOINT_PK_NOT_SET
+        );
+        s.pending_initial_cards = Some(list_of_cards);
     }
     Ok(())
 }
@@ -1630,15 +1740,7 @@ fn handle_zk_proof_shuffle_chunk_received(
             error!("No shuffle proof bytes yet");
         } else {
             if validate_chunks(&s.public_shuffle_bytes, length) {
-                // Call process_shuffle_verification here
-                match process_shuffle_verification(&mut *s) {
-                    Ok(_) => {
-                        info!("Shuffle verification completed");
-                    }
-                    Err(e) => {
-                        error!("Error in shuffle verification: {:?}", e);
-                    }
-                }
+                try_process_pending_shuffle_verification(&mut *s, "shuffle chunks received");
             }
         }
     }
@@ -1649,14 +1751,7 @@ fn handle_zk_proof_shuffle_proof_received(state: Rc<RefCell<PokerState>>, proof_
     s.proof_shuffle_bytes = proof_bytes;
 
     if s.is_all_public_shuffle_bytes_received {
-        match process_shuffle_verification(&mut *s) {
-            Ok(_) => {
-                info!("Shuffle verification completed");
-            }
-            Err(e) => {
-                error!("Error in shuffle verification: {:?}", e);
-            }
-        }
+        try_process_pending_shuffle_verification(&mut *s, "shuffle proof received");
     } else {
         info!("Not all public shuffle bytes received yet");
     }
@@ -2310,8 +2405,16 @@ fn process_reshuffle_verification(
 /// `&mut`. Whatever the body returns, the outer function unconditionally
 /// reinserts the values into `s`.
 fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
-    let mut player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
-    let mut deck = s.deck.take().expect(ERROR_DECK_NOT_SET);
+    let Some(mut player) = s.my_player.take() else {
+        warn!("{}", ERROR_PLAYER_NOT_SET);
+        return Err(ERROR_PLAYER_NOT_SET.to_string().into());
+    };
+
+    let Some(mut deck) = s.deck.take() else {
+        warn!("{}", ERROR_DECK_NOT_SET);
+        s.my_player = Some(player);
+        return Err(ERROR_DECK_NOT_SET.to_string().into());
+    };
 
     let outcome = process_shuffle_verification_body(s, &mut player, &mut deck);
 

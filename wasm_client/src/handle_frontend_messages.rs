@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::handle_poker_messages::{
-    send_protocol_message, serialize_canonical, ProtocolMessage, PublicKeyInfoEncoded,
-    ERROR_DECK_NOT_SET, ERROR_NAME_BYTES_NOT_SET, ERROR_PLAYER_NOT_SET,
+    process_pending_public_key_infos, send_protocol_message, serialize_canonical, ProtocolMessage,
+    PublicKeyInfoEncoded, ERROR_DECK_NOT_SET, ERROR_NAME_BYTES_NOT_SET, ERROR_PLAYER_NOT_SET,
 };
 
 pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String) {
@@ -50,8 +50,12 @@ pub fn create_player(state: Rc<RefCell<PokerState>>, player_address: String) {
 }
 
 pub fn set_player_id(state: Rc<RefCell<PokerState>>, player_id: String) {
-    let mut s = state.borrow_mut();
-    s.my_id = Some(player_id.to_string());
+    {
+        let mut s = state.borrow_mut();
+        s.my_id = Some(player_id.to_string());
+    }
+
+    process_pending_public_key_infos(state);
 
     // let message = ProtocolMessage::PlayerId(player_id.parse::<u8>().unwrap());
     // if let Err(e) = send_protocol_message(&mut *s, message) {

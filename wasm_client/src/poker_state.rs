@@ -1,3 +1,4 @@
+use crate::handle_poker_messages::PublicKeyInfoEncoded;
 use rand::thread_rng;
 use std::collections::HashMap;
 use std::default::Default;
@@ -110,6 +111,8 @@ pub struct PokerState {
     pub pk_proof_info_array: Vec<(PublicKey, ProofKeyOwnership, Vec<u8>)>,
     pub joint_pk: Option<PublicKey>,
     pub card_mapping: Option<HashMap<Card, ClassicPlayingCard>>,
+    pub pending_initial_cards: Option<Vec<Card>>,
+    pub pending_public_key_infos: Vec<(RtcPeerConnection, RtcDataChannel, PublicKeyInfoEncoded)>,
     pub deck: Option<Vec<MaskedCard>>,
     pub provers: Provers,
 
@@ -162,6 +165,8 @@ impl PokerState {
         // Reset game-specific state while keeping connection info
         self.deck = None;
         self.card_mapping = None;
+        self.pending_initial_cards = None;
+        self.pending_public_key_infos = Vec::new();
         self.received_reveal_tokens1 = Vec::new();
         self.received_reveal_tokens2 = Vec::new();
         self.community_cards_tokens = vec![Vec::new(); 5];

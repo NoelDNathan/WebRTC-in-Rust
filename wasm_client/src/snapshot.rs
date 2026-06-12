@@ -227,6 +227,7 @@ impl PokerCryptoSnapshot {
                     .collect::<SnapshotResult<std::collections::HashMap<_, _>>>()
             })
             .transpose()?;
+        state.pending_initial_cards = None;
         state.current_dealer = self.current_dealer;
         state.num_players_connected = self.num_players_connected;
         state.current_shuffler = self.current_shuffler;
