@@ -4,13 +4,36 @@ use std::collections::HashMap;
 use std::default::Default;
 use texas_holdem::{
     generator, Card, CardParameters, CardProtocol, ClassicPlayingCard, InternalPlayer, MaskedCard,
-    ProofKeyOwnership, PublicKey, RevealProof, RevealToken,
+    ProofKeyOwnership, PublicKey, RevealProof, RevealToken, Scalar,
 };
 
 use log::error;
 use std::rc::Rc;
 use web_sys::{RtcDataChannel, RtcPeerConnection};
+use zk_reshuffle::lego::LegoProofJson;
 use zk_reshuffle::CircomProver;
+
+/// Una entrada del pool de precompute (capa 3.4b paso 3): una proof generada en
+/// background con sus `r_prime` y `link_v_seed`. Al consumirla en el turno, el
+/// residual debe usar EXACTAMENTE estos `r_prime`/`link_v_seed` para que su
+/// `link_d` coincida con el de la precompute (el enlace cp_link del pool).
+#[derive(Clone)]
+pub struct PrecomputeEntry {
+    pub r_prime: Vec<Scalar>,
+    pub link_v_seed: u64,
+    pub proof: LegoProofJson,
+}
+
+/// Los 4 artefactos del precompute, fetcheados por JS al entrar a la sala
+/// (no se embeben: ~30 MB juntos). `circom_*` calculan el witness con ark-circom;
+/// `lego_*` (PK ~20 MB + `CircuitR1cs`) hacen el prove/verify cp_link.
+#[derive(Clone, Default)]
+pub struct PrecomputeArtifacts {
+    pub circom_wasm: Vec<u8>,
+    pub circom_r1cs: Vec<u8>,
+    pub lego_pk: Vec<u8>,
+    pub lego_r1cs: Vec<u8>,
+}
 
 #[derive(Clone)]
 pub struct PlayerInfo {
@@ -154,6 +177,12 @@ pub struct PokerState {
     pub proof_shuffle_bytes: Vec<u8>,
     pub is_all_public_shuffle_bytes_received: bool,
 
+    // Pool de precompute LegoGroth16 (capa 3.4b paso 3). `precompute_artifacts`
+    // se setea una vez (fetch JS); `precompute_pool` se rellena en background y se
+    // consume 1 entrada por barajado/remask propio.
+    pub precompute_artifacts: Option<PrecomputeArtifacts>,
+    pub precompute_pool: Vec<PrecomputeEntry>,
+
     // Store revealed cards for score calculation
     pub my_revealed_cards: [Option<ClassicPlayingCard>; 2],
     pub revealed_community_cards: [Option<ClassicPlayingCard>; 5],
@@ -178,6 +207,8 @@ impl PokerState {
         self.public_shuffle_bytes = Vec::new();
         self.proof_shuffle_bytes = Vec::new();
         self.is_all_public_shuffle_bytes_received = false;
+        // El pool se consume por partida; los artefactos (fetch caro) se conservan.
+        self.precompute_pool = Vec::new();
         self.my_revealed_cards = [None, None];
         self.revealed_community_cards = [None, None, None, None, None];
 

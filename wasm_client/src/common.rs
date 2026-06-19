@@ -26,7 +26,7 @@ use web_sys::{
     RtcIceTransportPolicy, RtcPeerConnection, WebSocket,
 };
 
-use crate::poker_state::{PokerState, Provers};
+use crate::poker_state::{PokerState, PrecomputeArtifacts, Provers};
 use crate::snapshot::PokerCryptoSnapshot;
 use shared_protocol::{SessionID, SignalEnum, UserID};
 use zk_reshuffle::CircomProver;
@@ -304,6 +304,51 @@ pub fn register_poker_callbacks(
         state.set_players_scores = set_players_scores;
         info!("Poker callbacks registered");
     }
+}
+
+/// Cachea los 4 artefactos del precompute (fetcheados por JS al entrar a la sala:
+/// circom `.wasm` + circom `.r1cs` + PK lego + r1cs lego). Se llama una vez antes
+/// de `generate_precompute`. No se embeben porque pesan ~30 MB juntos.
+#[wasm_bindgen]
+pub fn set_precompute_artifacts(
+    circom_wasm: Vec<u8>,
+    circom_r1cs: Vec<u8>,
+    lego_pk: Vec<u8>,
+    lego_r1cs: Vec<u8>,
+) {
+    if let Some(poker_state) = get_poker_state() {
+        let mut s = poker_state.borrow_mut();
+        s.precompute_artifacts = Some(PrecomputeArtifacts {
+            circom_wasm,
+            circom_r1cs,
+            lego_pk,
+            lego_r1cs,
+        });
+        info!("Precompute artifacts set");
+    } else {
+        error!("set_precompute_artifacts: poker state not initialized");
+    }
+}
+
+/// Genera UNA entrada de precompute en background y la añade al pool; devuelve el
+/// tamaño del pool resultante. Requiere `set_precompute_artifacts` + `joint_pk`
+/// previos. CPU-intensivo (PK ~20 MB): conviene llamarlo desde un Web Worker.
+/// La entrada guarda sus `r_prime`/`link_v_seed` para que el residual del turno
+/// los reutilice (mismo `link_d` = enlace del pool).
+#[wasm_bindgen]
+pub fn generate_precompute() -> Result<usize, JsValue> {
+    let poker_state =
+        get_poker_state().ok_or_else(|| JsValue::from_str("poker state not initialized"))?;
+    let mut s = poker_state.borrow_mut();
+
+    // La criptografía vive en `build_precompute_entry` (handle_poker_messages),
+    // compartida con el fallback en-caliente del turno para no divergir.
+    let entry = crate::handle_poker_messages::build_precompute_entry(&s)
+        .map_err(|e| JsValue::from_str(&format!("generate_precompute failed: {}", e)))?;
+    s.precompute_pool.push(entry);
+    let len = s.precompute_pool.len();
+    info!("Precompute generated; pool size = {}", len);
+    Ok(len)
 }
 
 /// Create a new session (host)
@@ -871,6 +916,8 @@ fn create_poker_state() -> PokerState {
         public_shuffle_bytes: Vec::new(),
         proof_shuffle_bytes: Vec::new(),
         is_all_public_shuffle_bytes_received: false,
+        precompute_artifacts: None,
+        precompute_pool: Vec::new(),
         my_revealed_cards: [None, None],
         revealed_community_cards: [None, None, None, None, None],
     }

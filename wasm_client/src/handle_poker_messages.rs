@@ -1,4 +1,4 @@
-use crate::poker_state::{PlayerInfo, PokerState};
+use crate::poker_state::{PlayerInfo, PokerState, PrecomputeEntry};
 use ark_ff::to_bytes;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use js_sys::{Object, Reflect};
@@ -2018,6 +2018,68 @@ pub fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Genera UNA entrada de precompute (sin añadirla al pool) desde el estado:
+/// `r_prime` (52 escalares < 2^100) + `link_v_seed` aleatorios + la proof
+/// cp_link de background. Centraliza la criptografía del pool para que el
+/// camino de pre-generación (background, `generate_precompute` en common.rs) y
+/// el fallback en-caliente (`take_or_make_precompute`) NO diverjan en el rango
+/// de `r_prime` ni en el orden de argumentos del prove. Requiere `joint_pk` +
+/// `precompute_artifacts` ya seteados.
+pub fn build_precompute_entry(s: &PokerState) -> Result<PrecomputeEntry, Box<dyn Error>> {
+    let pp = s.pp.clone();
+    let joint_pk = s.joint_pk.clone().ok_or(ERROR_JOINT_PK_NOT_SET)?;
+    let artifacts = s
+        .precompute_artifacts
+        .as_ref()
+        .ok_or("precompute artifacts not set")?;
+
+    let mut rng = StdRng::from_entropy();
+    let max_value: u128 = 2u128.pow(100);
+    let r_prime: Vec<Scalar> = (0..52)
+        .map(|_| Scalar::from(rng.gen_range(0..max_value)))
+        .collect();
+    let link_v_seed: u64 = rng.gen();
+
+    let out = CardProtocol::prove_precompute_lego(
+        &r_prime,
+        &pp,
+        &joint_pk,
+        link_v_seed,
+        &artifacts.circom_wasm,
+        &artifacts.circom_r1cs,
+        &artifacts.lego_r1cs,
+        &artifacts.lego_pk,
+    )?;
+
+    if !out.verified {
+        return Err("precompute proof failed self-verification".into());
+    }
+
+    Ok(PrecomputeEntry {
+        r_prime,
+        link_v_seed,
+        proof: out.proof,
+    })
+}
+
+/// Saca una entrada del pool para el turno; si está vacío, la genera en caliente
+/// (lento — el camino normal es tenerla pre-generada en background). El residual
+/// del turno DEBE usar el `r_prime`+`link_v_seed` de la entrada devuelta para que
+/// `link_d` enlace con la precompute.
+fn take_or_make_precompute(s: &mut PokerState) -> Result<PrecomputeEntry, Box<dyn Error>> {
+    if let Some(entry) = s.precompute_pool.pop() {
+        if DEBUG_MODE {
+            info!(
+                "Consumiendo precompute del pool (quedan {})",
+                s.precompute_pool.len()
+            );
+        }
+        return Ok(entry);
+    }
+    warn!("Pool de precompute vacío: generando en caliente (lento)");
+    build_precompute_entry(s)
+}
+
 #[allow(non_snake_case)]
 fn shuffle_remask_and_send(
     s: &mut PokerState,
@@ -2031,36 +2093,20 @@ fn shuffle_remask_and_send(
 
     let permutation = Permutation::new(&mut rng, M * N);
 
-    let mut rng_r_prime = StdRng::from_entropy();
-
-    let base: u128 = 2;
-    let exponent: u32 = 100;
-    let max_value: u128 = base.pow(exponent);
-
-    if DEBUG_MODE {
-        info!(
-            "DEBUG: Generating r_prime values with max_value: {}",
-            max_value
-        );
-    }
-
-    let mut r_prime = Vec::new();
-    for _ in 0..52 {
-        let random_value = rng_r_prime.gen_range(0..max_value); // Generate a random number in the range [0, 2^162)
-        let r = Scalar::from(random_value); // Convert the random number to Self::Scalar
-        r_prime.push(r);
-    }
+    // Pool de precompute (capa 3.4b paso 3): el residual del turno REUTILIZA el
+    // `r_prime` + `link_v_seed` de una entrada precomputada en background, para que
+    // su `link_d` coincida con el de la precompute (el enlace cp_link). Si el pool
+    // está vacío, `take_or_make_precompute` la genera en caliente.
+    let entry = take_or_make_precompute(s)?;
+    let PrecomputeEntry {
+        r_prime,
+        link_v_seed,
+        proof: precompute_proof,
+    } = entry;
 
     if DEBUG_MODE {
-        info!("DEBUG: Generated {} r_prime values", r_prime.len());
+        info!("DEBUG: usando {} r_prime del pool", r_prime.len());
     }
-
-    // link_v_seed: blinding compartido entre la precompute y la residual para que
-    // `link_d` enlace ambas proofs. TODO(capa 3.4b paso 3 — pool de precompute):
-    // debe venir del precompute generado en background al entrar a la sala.
-    // Mientras no exista ese pool, un seed aleatorio por barajado es suficiente:
-    // la residual cp_link se auto-verifica de forma independiente.
-    let link_v_seed: u64 = rng.gen();
 
     let prove_output = CardProtocol::shuffle_and_remask2_lego(
         &permutation,
@@ -2084,12 +2130,20 @@ fn shuffle_remask_and_send(
         );
     }
 
-    // El bundle lego es un único JSON {a,b,c,d,link_d,link_pi,pubs}: los pubs
-    // viajan dentro → NO se trocean chunks de `public` aparte (a diferencia del
-    // Groth16 plano). Se envía el JSON completo en ZKProofShuffleProof.
-    let proof_bytes = lego_proof.to_json_string().into_bytes();
+    // Bundle del pool {precompute, residual}: ambas comparten `link_d`. Viaja como
+    // un único JSON en ZKProofShuffleProof (sin canal nuevo). Cada peer verifica
+    // residual + precompute + que enlacen (`links_match`).
+    let bundle = zk_reshuffle::lego::LegoBundle {
+        precompute: precompute_proof,
+        residual: lego_proof.clone(),
+    };
+    debug_assert!(
+        bundle.links_match(),
+        "precompute y residual del shuffle deben compartir link_d"
+    );
+    let proof_bytes = bundle.to_json_string().into_bytes();
     if let Err(e) = send_protocol_message(s, ProtocolMessage::ZKProofShuffleProof(proof_bytes)) {
-        error!("Error sending lego shuffle proof: {:?}", e);
+        error!("Error sending lego shuffle bundle: {:?}", e);
         return Err(format!("{:?}", e).into());
     }
 
@@ -2245,19 +2299,46 @@ fn process_shuffle_verification(s: &mut PokerState) -> Result<(), Box<dyn Error>
     outcome
 }
 
+/// Verifica la mitad `precompute` de un `LegoBundle` recibido + el enlace
+/// `link_d` con la residual. La residual la verifica el caller (barnett, que
+/// además reconstruye el mazo). Necesita la PK lego (~20 MB) cacheada vía
+/// `set_precompute_artifacts`. Devuelve error sin panic ante cualquier fallo.
+fn verify_bundle_precompute(
+    s: &PokerState,
+    bundle: &zk_reshuffle::lego::LegoBundle,
+) -> Result<(), Box<dyn Error>> {
+    if !bundle.links_match() {
+        return Err("bundle lego: precompute y residual no comparten link_d".into());
+    }
+    let lego_pk = s
+        .precompute_artifacts
+        .as_ref()
+        .map(|a| a.lego_pk.as_slice())
+        .ok_or("precompute artifacts not set: no se puede verificar la precompute")?;
+    if !zk_reshuffle::lego::verify_precompute_lego(&bundle.precompute, lego_pk) {
+        return Err("bundle lego: la proof de precompute no verifica".into());
+    }
+    Ok(())
+}
+
 #[allow(non_snake_case)]
 fn process_shuffle_verification_body(
     s: &mut PokerState,
     player: &mut InternalPlayer,
     deck: &mut Vec<MaskedCard>,
 ) -> Result<(), Box<dyn Error>> {
-    // Bundle lego: un único JSON {a,b,c,d,link_d,link_pi,pubs}. Los `pubs` viajan
-    // dentro → no hay chunks de `public` que reensamblar. Deserializamos sin panic
-    // (la entrada viene de un peer potencialmente malicioso).
+    // Bundle lego {precompute, residual}: un único JSON con los pubs dentro → no
+    // hay chunks de `public` que reensamblar. Deserializamos sin panic (la entrada
+    // viene de un peer potencialmente malicioso).
     let proof_str = std::str::from_utf8(&s.proof_shuffle_bytes)
-        .map_err(|e| format!("Lego shuffle proof no es UTF-8 válido: {:?}", e))?;
-    let lego_proof: zk_reshuffle::lego::LegoProofJson = serde_json::from_str(proof_str)
-        .map_err(|e| format!("Failed to deserialize lego shuffle proof: {:?}", e))?;
+        .map_err(|e| format!("Lego shuffle bundle no es UTF-8 válido: {:?}", e))?;
+    let bundle = zk_reshuffle::lego::LegoBundle::from_json_str(proof_str)
+        .ok_or_else(|| "Failed to deserialize lego shuffle bundle".to_string())?;
+
+    // La precompute del bundle + su enlace con la residual (el resto del bundle lo
+    // verifica `verify_shuffle_remask2_lego`).
+    verify_bundle_precompute(s, &bundle)?;
+    let lego_proof = &bundle.residual;
 
     let pp = s.pp.clone();
     let joint_pk = s
@@ -2267,13 +2348,13 @@ fn process_shuffle_verification_body(
         .clone();
     let mut rng = StdRng::from_entropy();
 
-    // Verifica el bundle (cp_link + Fiat-Shamir + H/G/Ca/Cb contra el estado) y
+    // Verifica la residual (cp_link + Fiat-Shamir + H/G/Ca/Cb contra el estado) y
     // reconstruye el mazo resultante desde Ca_out/Cb_out.
     let shuffled_deck = match CardProtocol::verify_shuffle_remask2_lego(
         &pp,
         &joint_pk,
         &*deck,
-        &lego_proof,
+        lego_proof,
     ) {
         Ok(shuffled_deck) => shuffled_deck,
         Err(e) => {
@@ -2462,12 +2543,17 @@ pub fn verify_remask_for_reshuffle(
 
     let m_list = card_mapping.keys().cloned().collect::<Vec<Card>>();
 
-    // Bundle lego: un único JSON {a,b,c,d,link_d,link_pi,pubs}. Deserializamos sin
-    // panic (la entrada viene de un peer potencialmente malicioso).
+    // Bundle lego {precompute, residual}. Deserializamos sin panic (la entrada
+    // viene de un peer potencialmente malicioso).
     let proof_str = std::str::from_utf8(&s.proof_reshuffle_bytes)
-        .map_err(|e| format!("Lego reshuffle proof no es UTF-8 válido: {:?}", e))?;
-    let lego_proof: zk_reshuffle::lego::LegoProofJson = serde_json::from_str(proof_str)
-        .map_err(|e| format!("Failed to deserialize lego reshuffle proof: {:?}", e))?;
+        .map_err(|e| format!("Lego reshuffle bundle no es UTF-8 válido: {:?}", e))?;
+    let bundle = zk_reshuffle::lego::LegoBundle::from_json_str(proof_str)
+        .ok_or_else(|| "Failed to deserialize lego reshuffle bundle".to_string())?;
+
+    // Precompute del bundle + enlace link_d (la residual la verifica
+    // `verify_reshuffle_remask_lego`).
+    verify_bundle_precompute(s, &bundle)?;
+    let lego_proof = &bundle.residual;
 
     match CardProtocol::verify_reshuffle_remask_lego(
         &s.pp,
@@ -2476,7 +2562,7 @@ pub fn verify_remask_for_reshuffle(
         &player_cards,
         player_pk,
         &m_list,
-        &lego_proof,
+        lego_proof,
     ) {
         Ok(reshuffled_deck) => {
             s.public_reshuffle_bytes.clear();
@@ -2497,22 +2583,15 @@ fn send_remask_for_reshuffle(
     player: &InternalPlayer,
     m_list: &Vec<Card>,
 ) -> Result<zk_reshuffle::lego::LegoProofJson, Box<dyn Error>> {
-    let mut rng = StdRng::from_entropy();
-
-    let base: u128 = 2;
-    let exponent: u32 = 100;
-    let max_value: u128 = base.pow(exponent);
-
-    let mut r_prime = Vec::new();
-    for _ in 0..52 {
-        let random_value = rng.gen_range(0..max_value); // Generar un número aleatorio en el rango [0, 2^162)
-        let r = Scalar::from(random_value); // Convertir el número aleatorio a Self::Scalar
-        r_prime.push(r);
-    }
-
-    // link_v_seed: TODO(capa 3.4b paso 3 — pool de precompute) compartirlo con la
-    // precompute. Sin FS en el reshuffle, un seed aleatorio por reshuffle basta.
-    let link_v_seed: u64 = rng.gen();
+    // Pool de precompute: el residual del reshuffle reutiliza el `r_prime` +
+    // `link_v_seed` de una entrada precomputada para enlazar `link_d`. Fallback en
+    // caliente si el pool está vacío.
+    let entry = take_or_make_precompute(s)?;
+    let PrecomputeEntry {
+        r_prime,
+        link_v_seed,
+        proof: precompute_proof,
+    } = entry;
 
     let prove_output = CardProtocol::remask_for_reshuffle_lego(
         &r_prime,
@@ -2533,15 +2612,26 @@ fn send_remask_for_reshuffle(
 
     let lego_proof = prove_output.proof;
 
-    // El bundle lego lleva los pubs dentro → solo se envía el JSON, sin chunks
-    // de `public` separados (a diferencia del Groth16 plano).
-    let proof_bytes = lego_proof.to_json_string().into_bytes();
+    // Bundle del pool {precompute, residual}: viaja como un único JSON en
+    // ZKProofRemoveAndRemaskProof (sin canal nuevo). El verificador comprueba
+    // residual + precompute + `links_match`.
+    let bundle = zk_reshuffle::lego::LegoBundle {
+        precompute: precompute_proof,
+        residual: lego_proof.clone(),
+    };
+    debug_assert!(
+        bundle.links_match(),
+        "precompute y residual del reshuffle deben compartir link_d"
+    );
+    let proof_bytes = bundle.to_json_string().into_bytes();
     if let Err(e) =
         send_protocol_message(s, ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes))
     {
-        error!("Error sending lego reshuffle proof: {:?}", e);
+        error!("Error sending lego reshuffle bundle: {:?}", e);
         return Err(format!("{:?}", e).into());
     }
 
+    // Devuelve el residual para la verificación/reconstrucción local del propio
+    // jugador (el bundle ya viajó a los peers).
     Ok(lego_proof)
 }
