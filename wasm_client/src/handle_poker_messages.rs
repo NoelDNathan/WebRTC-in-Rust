@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, Document, HtmlAnchorElement, RtcDataChannel, RtcPeerConnection, Url, Window};
-use zk_reshuffle::{deserialize_proof, serialize_proof, Proof as ZKProofCardRemoval};
+// `serialize_proof`/`deserialize_proof`/`Proof` (Groth16 plano) ya no se usan en
+// el camino lego del shuffle/reshuffle; `format_proof_for_js` referencia
+// `zk_reshuffle::Proof` por ruta completa. Los chunks de `public` desaparecen
+// porque el bundle lego ya los lleva dentro.
 
 use ark_std::One;
 use barnett_smart_card_protocol::BarnettSmartProtocol;
@@ -1710,18 +1713,18 @@ fn handle_zk_proof_remove_and_remask_proof_received(
 
     s.proof_reshuffle_bytes = proof_bytes;
 
-    if s.is_all_public_reshuffle_bytes_received {
-        match process_reshuffle_verification(&mut *s) {
-            Ok((reshuffled_deck, new_reshuffler)) => {
-                s.deck = Some(reshuffled_deck);
-                s.current_reshuffler = new_reshuffler;
-            }
-            Err(e) => {
-                error!("Error en proceso de verificación de reshuffle: {:?}", e);
-            }
+    // El bundle lego lleva los `pubs` dentro del JSON → no llegan chunks de
+    // `public` por separado. Marcamos los publics como recibidos para no quedar
+    // esperando chunks que el prover lego ya no envía.
+    s.is_all_public_reshuffle_bytes_received = true;
+    match process_reshuffle_verification(&mut *s) {
+        Ok((reshuffled_deck, new_reshuffler)) => {
+            s.deck = Some(reshuffled_deck);
+            s.current_reshuffler = new_reshuffler;
         }
-    } else {
-        error!("No all public reshuffle bytes");
+        Err(e) => {
+            error!("Error en proceso de verificación de reshuffle: {:?}", e);
+        }
     }
 }
 
@@ -1750,11 +1753,11 @@ fn handle_zk_proof_shuffle_proof_received(state: Rc<RefCell<PokerState>>, proof_
     let mut s = state.borrow_mut();
     s.proof_shuffle_bytes = proof_bytes;
 
-    if s.is_all_public_shuffle_bytes_received {
-        try_process_pending_shuffle_verification(&mut *s, "shuffle proof received");
-    } else {
-        info!("Not all public shuffle bytes received yet");
-    }
+    // El bundle lego lleva los `pubs` dentro del propio JSON → no llegan chunks de
+    // `public` por separado. Marcamos los publics como recibidos para no quedar
+    // esperando chunks que el prover lego ya no envía.
+    s.is_all_public_shuffle_bytes_received = true;
+    try_process_pending_shuffle_verification(&mut *s, "shuffle proof received");
 }
 
 // -----------------------------HELPER FUNCTIONS-----------------------------
@@ -2052,244 +2055,63 @@ fn shuffle_remask_and_send(
         info!("DEBUG: Generated {} r_prime values", r_prime.len());
     }
 
-    match CardProtocol::shuffle_and_remask2(
-        &mut s.provers.prover_shuffle,
+    // link_v_seed: blinding compartido entre la precompute y la residual para que
+    // `link_d` enlace ambas proofs. TODO(capa 3.4b paso 3 — pool de precompute):
+    // debe venir del precompute generado en background al entrar a la sala.
+    // Mientras no exista ese pool, un seed aleatorio por barajado es suficiente:
+    // la residual cp_link se auto-verifica de forma independiente.
+    let link_v_seed: u64 = rng.gen();
+
+    let prove_output = CardProtocol::shuffle_and_remask2_lego(
         &permutation,
-        &mut r_prime,
+        &r_prime,
         &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         &new_deck,
-    ) {
-        Ok((public, proof)) => {
-            if DEBUG_MODE {
-                info!(
-                    "DEBUG: shuffleAndRemask2 succeeded, public size: {}",
-                    public.len()
-                );
-            }
-            let chunk_size = 50; // Ajusta este valor según sea necesario
-            let serializable_public: Vec<String> = public.iter().map(|fr| fr.to_string()).collect();
-            if DEBUG_MODE {
-                info!(
-                    "DEBUG: Serialized public to {} strings",
-                    serializable_public.len()
-                );
-            }
+        link_v_seed,
+    )?;
 
-            let chunks = serializable_public.chunks(chunk_size).collect::<Vec<_>>();
-            let length = chunks.len();
-            if DEBUG_MODE {
-                info!("DEBUG: Split into {} chunks of size {}", length, chunk_size);
-            }
-
-            let serialized_chunks: Vec<Vec<u8>> = chunks
-                .iter()
-                .map(|chunk| serde_json::to_vec(chunk).unwrap_or_default())
-                .collect();
-            if DEBUG_MODE {
-                info!(
-                    "DEBUG: Serialized chunks to bytes, total size: {} bytes",
-                    serialized_chunks
-                        .iter()
-                        .map(|chunk| chunk.len())
-                        .sum::<usize>()
-                );
-            }
-
-            // let public_strings = deserializar_chunks_a_strings(serialized_chunks.clone())?;
-            if DEBUG_MODE {
-                info!("DEBUG: Deserialized chunks back to strings successfully");
-            }
-
-            for (i, chunk) in serialized_chunks.iter().enumerate() {
-                if DEBUG_MODE {
-                    info!(
-                        "DEBUG: Sending chunk {}/{} ({} bytes)",
-                        i + 1,
-                        length,
-                        chunk.len()
-                    );
-                }
-                if let Err(e) = send_protocol_message(
-                    s,
-                    ProtocolMessage::ZKProofShuffleChunk(i as u8, length as u8, chunk.clone()),
-                ) {
-                    if DEBUG_MODE {
-                        error!("Error sending zk proof chunk {}: {:?}", i, e);
-                    }
-                    return Err(format!("{:?}", e).into());
-                }
-                if DEBUG_MODE {
-                    info!("DEBUG: Successfully sent chunk {}/{}", i + 1, length);
-                }
-            }
-
-            // Enviar la prueba por separado
-            if DEBUG_MODE {
-                info!("DEBUG: Serializing proof...");
-            }
-            let proof_bytes = serialize_proof(&proof)?;
-            if DEBUG_MODE {
-                info!("DEBUG: Proof serialized to {} bytes", proof_bytes.len());
-            }
-
-            if let Err(e) =
-                send_protocol_message(s, ProtocolMessage::ZKProofShuffleProof(proof_bytes))
-            {
-                if DEBUG_MODE {
-                    error!("Error sending zk proof: {:?}", e);
-                }
-                return Err(format!("{:?}", e).into());
-            }
-            if DEBUG_MODE {
-                info!("DEBUG: Successfully sent proof");
-            }
-
-            if DEBUG_MODE {
-                info!("DEBUG: Verifying shuffle and remask...");
-            }
-            match CardProtocol::verify_shuffle_remask2(
-                &mut s.provers.prover_shuffle,
-                &s.pp,
-                &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
-                &new_deck.to_vec(),
-                public.clone(),
-                proof.clone(),
-            ) {
-                Ok(shuffled_deck) => {
-                    if DEBUG_MODE {
-                        info!(
-                            "DEBUG: Verification succeeded, shuffled deck size: {}",
-                            shuffled_deck.len()
-                        );
-                    }
-
-                    // Call the JavaScript callback to verify shuffling if available
-
-                    if DEBUG_MODE {
-                        info!("DEBUG: Calling JavaScript verify_shuffling callback...");
-                    }
-
-                    let verify_shuffling_clone = s.verify_shuffling.clone();
-
-                    let (public_str, proof_str) = format_proof_for_js(&public, &proof);
-
-                    if let Err(e) =
-                        verify_shuffling_clone.call2(&JsValue::NULL, &public_str, &proof_str)
-                    {
-                        error!("verify_shuffling callback failed: {:?}", e);
-                    }
-
-                    if DEBUG_MODE {
-                        info!("DEBUG: JavaScript callback sent successfully");
-                    }
-
-                    // Guardar los datos de la proof y public signals para debugging
-                    if DEBUG_MODE {
-                        info!("DEBUG: Saving proof and public data to files...");
-
-                        // Crear contenido detallado para debugging
-                        let public_clone_debug = public.clone();
-                        let proof_clone_debug = proof.clone();
-                        let debug_content = format!(
-                            "=== SHUFFLING PROOF DEBUG DATA ===\n\
-                            Timestamp: {}\n\n\
-                            === PUBLIC SIGNALS ({} elements) ===\n\
-                            {:?}\n\n\
-                            === PROOF COMPONENTS ===\n\
-                            proofA: ({}, {})\n\
-                            proofB: (({}, {}), ({}, {}))\n\
-                            proofC: ({}, {})\n\n\
-                            === FORMATTED FOR CONTRACT ===\n\
-                            proofA: [{}, {}]\n\
-                            proofB: [[{}, {}], [{}, {}]]\n\
-                            proofC: [{}, {}]\n\n\
-                            === PUBLIC SIGNALS AS STRINGS ===\n\
-                            {:?}\n",
-                            js_sys::Date::new_0()
-                                .to_iso_string()
-                                .as_string()
-                                .unwrap_or_default(),
-                            public_clone_debug.len(),
-                            public_clone_debug,
-                            proof_clone_debug.a.x.to_string(),
-                            proof_clone_debug.a.y.to_string(),
-                            proof_clone_debug.b.x.c0.to_string(),
-                            proof_clone_debug.b.x.c1.to_string(),
-                            proof_clone_debug.b.y.c0.to_string(),
-                            proof_clone_debug.b.y.c1.to_string(),
-                            proof_clone_debug.c.x.to_string(),
-                            proof_clone_debug.c.y.to_string(),
-                            proof_clone_debug.a.x.to_string(),
-                            proof_clone_debug.a.y.to_string(),
-                            proof_clone_debug.b.x.c0.to_string(),
-                            proof_clone_debug.b.x.c1.to_string(),
-                            proof_clone_debug.b.y.c0.to_string(),
-                            proof_clone_debug.b.y.c1.to_string(),
-                            proof_clone_debug.c.x.to_string(),
-                            proof_clone_debug.c.y.to_string(),
-                            public_clone_debug
-                                .iter()
-                                .map(|fr| fr.to_string())
-                                .collect::<Vec<String>>()
-                        );
-
-                        // Guardar archivo de debug
-                        // if let Err(e) = save_to_file("shuffling_debug.txt", &debug_content) {
-                        //     error!("Error saving debug file: {:?}", e);
-                        // } else {
-                        //     info!("DEBUG: Debug file saved successfully");
-                        // }
-
-                        // Guardar solo los public signals en formato JSON
-                        let public_json = serde_json::to_string_pretty(
-                            &public_clone_debug
-                                .iter()
-                                .map(|fr| fr.to_string())
-                                .collect::<Vec<String>>(),
-                        )
-                        .unwrap_or_default();
-
-                        // if let Err(e) = save_to_file("public_signals.json", &public_json) {
-                        //     error!("Error saving public signals file: {:?}", e);
-                        // } else {
-                        //     info!("DEBUG: Public signals file saved successfully");
-                        // }
-
-                        // // Guardar proof en formato JSON
-                        // let proof_json = serde_json::to_string_pretty(&serde_json::json!({
-                        //     "proofA": [proof_clone.a.x.to_string(), proof_clone.a.y.to_string()],
-                        //     "proofB": [
-                        //         [proof_clone.b.x.c0.to_string(), proof_clone.b.x.c1.to_string()],
-                        //         [proof_clone.b.y.c0.to_string(), proof_clone.b.y.c1.to_string()]
-                        //     ],
-                        //     "proofC": [proof_clone.c.x.to_string(), proof_clone.c.y.to_string()]
-                        // }))
-                        // .unwrap_or_default();
-
-                        // if let Err(e) = save_to_file("proof_components.json", &proof_json) {
-                        //     error!("Error saving proof file: {:?}", e);
-                        // } else {
-                        //     info!("DEBUG: Proof file saved successfully");
-                        // }
-                    }
-
-                    if DEBUG_MODE {
-                        info!("DEBUG: shuffle_remask_and_send completed successfully");
-                    }
-                    Ok(shuffled_deck)
-                }
-                Err(e) => {
-                    error!("Error verifying shuffle: {:?}", e);
-                    Err(Box::new(e))
-                }
-            }
-        }
-        Err(e) => {
-            error!("Error remasking for reshuffle: {:?}", e);
-            Err(Box::new(e))
-        }
+    if !prove_output.verified {
+        error!("Lego shuffle proof failed self-verification");
+        return Err("Lego shuffle proof failed self-verification".into());
     }
+
+    let lego_proof = prove_output.proof;
+    if DEBUG_MODE {
+        info!(
+            "DEBUG: lego shuffle proof generated, {} pubs",
+            lego_proof.pubs.len()
+        );
+    }
+
+    // El bundle lego es un único JSON {a,b,c,d,link_d,link_pi,pubs}: los pubs
+    // viajan dentro → NO se trocean chunks de `public` aparte (a diferencia del
+    // Groth16 plano). Se envía el JSON completo en ZKProofShuffleProof.
+    let proof_bytes = lego_proof.to_json_string().into_bytes();
+    if let Err(e) = send_protocol_message(s, ProtocolMessage::ZKProofShuffleProof(proof_bytes)) {
+        error!("Error sending lego shuffle proof: {:?}", e);
+        return Err(format!("{:?}", e).into());
+    }
+
+    // Verificación local + reconstrucción del mazo resultante desde Ca_out/Cb_out
+    // (mismo contrato que `verify_shuffle_remask2`).
+    let shuffled_deck = CardProtocol::verify_shuffle_remask2_lego(
+        &s.pp,
+        &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
+        &new_deck.to_vec(),
+        &lego_proof,
+    )?;
+
+    // TODO(capa 4 — frontend): el callback JS `verify_shuffling` (vía
+    // `format_proof_for_js`) alimentaba al frontend con el Groth16 plano para la
+    // tx on-chain. Con lego debe pasar `LegoLink + pubs` (ABI nueva de capa 2).
+    // Se reconecta junto con la capa 4 (acopla wasm_client ↔ frontend).
+
+    if DEBUG_MODE {
+        info!("DEBUG: shuffle_remask_and_send (lego) completed successfully");
+    }
+
+    Ok(shuffled_deck)
 }
 
 fn process_reshuffle_verification(
@@ -2332,9 +2154,8 @@ fn process_reshuffle_verification(
 
                         let player = s.my_player.take().expect(ERROR_PLAYER_NOT_SET);
                         match send_remask_for_reshuffle(s, &reshuffled_deck, &player, &m_list) {
-                            Ok((public, proof)) => {
-                                let final_deck = CardProtocol::verify_reshuffle_remask(
-                                    &mut s.provers.prover_reshuffle,
+                            Ok(lego_proof) => {
+                                let final_deck = CardProtocol::verify_reshuffle_remask_lego(
                                     &pp,
                                     &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
                                     &reshuffled_deck,
@@ -2345,8 +2166,7 @@ fn process_reshuffle_verification(
                                         .collect::<Vec<_>>(),
                                     &player.pk,
                                     &m_list,
-                                    public,
-                                    proof,
+                                    &lego_proof,
                                 )?;
 
                                 if new_reshuffler == num_players_connected as u8 {
@@ -2431,22 +2251,14 @@ fn process_shuffle_verification_body(
     player: &mut InternalPlayer,
     deck: &mut Vec<MaskedCard>,
 ) -> Result<(), Box<dyn Error>> {
-    let public_strings = deserialize_chunks(&s.public_shuffle_bytes)?;
-    let public_fr: Vec<Bn254Fr> = public_strings
-        .iter()
-        .map(|s_i| {
-            let cleaned_str = s_i.trim();
-            match Bn254Fr::from_str(cleaned_str) {
-                Ok(fr) => fr,
-                Err(e) => {
-                    error!("Error parsing string '{}': {:?}", cleaned_str, e);
-                    Bn254Fr::from(0u64)
-                }
-            }
-        })
-        .collect();
+    // Bundle lego: un único JSON {a,b,c,d,link_d,link_pi,pubs}. Los `pubs` viajan
+    // dentro → no hay chunks de `public` que reensamblar. Deserializamos sin panic
+    // (la entrada viene de un peer potencialmente malicioso).
+    let proof_str = std::str::from_utf8(&s.proof_shuffle_bytes)
+        .map_err(|e| format!("Lego shuffle proof no es UTF-8 válido: {:?}", e))?;
+    let lego_proof: zk_reshuffle::lego::LegoProofJson = serde_json::from_str(proof_str)
+        .map_err(|e| format!("Failed to deserialize lego shuffle proof: {:?}", e))?;
 
-    let proof = deserialize_proof(&s.proof_shuffle_bytes)?;
     let pp = s.pp.clone();
     let joint_pk = s
         .joint_pk
@@ -2455,17 +2267,17 @@ fn process_shuffle_verification_body(
         .clone();
     let mut rng = StdRng::from_entropy();
 
-    let shuffled_deck = match CardProtocol::verify_shuffle_remask2(
-        &mut s.provers.prover_shuffle,
+    // Verifica el bundle (cp_link + Fiat-Shamir + H/G/Ca/Cb contra el estado) y
+    // reconstruye el mazo resultante desde Ca_out/Cb_out.
+    let shuffled_deck = match CardProtocol::verify_shuffle_remask2_lego(
         &pp,
         &joint_pk,
-        deck,
-        public_fr,
-        proof,
+        &*deck,
+        &lego_proof,
     ) {
         Ok(shuffled_deck) => shuffled_deck,
         Err(e) => {
-            error!("Error verifying shuffle remask: {:?}", e);
+            error!("Error verifying lego shuffle remask: {:?}", e);
             return Err(Box::new(e));
         }
     };
@@ -2640,8 +2452,7 @@ pub fn verify_remask_for_reshuffle(
     player_cards: Vec<MaskedCard>,
     player_pk: &PublicKey,
 ) -> Result<Vec<MaskedCard>, Box<dyn Error>> {
-    let public_strings = deserialize_chunks(&s.public_reshuffle_bytes)?;
-    info!("verify_remask_for_reshuffle");
+    info!("verify_remask_for_reshuffle (lego)");
 
     let public_cards_1 = player_cards[0].clone();
     let public_cards_2 = player_cards[1].clone();
@@ -2650,33 +2461,22 @@ pub fn verify_remask_for_reshuffle(
     let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
     let m_list = card_mapping.keys().cloned().collect::<Vec<Card>>();
-    let proof = deserialize_proof(&s.proof_reshuffle_bytes).expect(ERROR_DESERIALIZE_PROOF_FAILED);
 
-    let public_fr: Vec<Bn254Fr> = public_strings
-        .iter()
-        .map(|s_i| {
-            // Eliminar cualquier espacio en blanco o caracteres adicionales
-            let cleaned_str = s_i.trim();
-            match Bn254Fr::from_str(cleaned_str) {
-                Ok(fr) => fr,
-                Err(e) => {
-                    error!("Error parsing string '{}': {:?}", cleaned_str, e);
-                    Bn254Fr::from(0u64)
-                }
-            }
-        })
-        .collect();
+    // Bundle lego: un único JSON {a,b,c,d,link_d,link_pi,pubs}. Deserializamos sin
+    // panic (la entrada viene de un peer potencialmente malicioso).
+    let proof_str = std::str::from_utf8(&s.proof_reshuffle_bytes)
+        .map_err(|e| format!("Lego reshuffle proof no es UTF-8 válido: {:?}", e))?;
+    let lego_proof: zk_reshuffle::lego::LegoProofJson = serde_json::from_str(proof_str)
+        .map_err(|e| format!("Failed to deserialize lego reshuffle proof: {:?}", e))?;
 
-    match CardProtocol::verify_reshuffle_remask(
-        &mut s.provers.prover_reshuffle,
+    match CardProtocol::verify_reshuffle_remask_lego(
         &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         &s.deck.as_ref().expect(ERROR_DECK_NOT_SET),
         &player_cards,
         player_pk,
         &m_list,
-        public_fr,
-        proof,
+        &lego_proof,
     ) {
         Ok(reshuffled_deck) => {
             s.public_reshuffle_bytes.clear();
@@ -2685,7 +2485,7 @@ pub fn verify_remask_for_reshuffle(
             Ok(reshuffled_deck)
         }
         Err(e) => {
-            error!("Error verifying reshuffle remask: {:?}", e);
+            error!("Error verifying lego reshuffle remask: {:?}", e);
             Err(Box::new(e))
         }
     }
@@ -2696,7 +2496,7 @@ fn send_remask_for_reshuffle(
     new_deck: &Vec<MaskedCard>,
     player: &InternalPlayer,
     m_list: &Vec<Card>,
-) -> Result<(Vec<Bn254Fr>, ZKProofCardRemoval), Box<dyn Error>> {
+) -> Result<zk_reshuffle::lego::LegoProofJson, Box<dyn Error>> {
     let mut rng = StdRng::from_entropy();
 
     let base: u128 = 2;
@@ -2710,9 +2510,12 @@ fn send_remask_for_reshuffle(
         r_prime.push(r);
     }
 
-    match CardProtocol::remask_for_reshuffle(
-        &mut s.provers.prover_reshuffle,
-        &mut r_prime,
+    // link_v_seed: TODO(capa 3.4b paso 3 — pool de precompute) compartirlo con la
+    // precompute. Sin FS en el reshuffle, un seed aleatorio por reshuffle basta.
+    let link_v_seed: u64 = rng.gen();
+
+    let prove_output = CardProtocol::remask_for_reshuffle_lego(
+        &r_prime,
         &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         new_deck,
@@ -2720,58 +2523,25 @@ fn send_remask_for_reshuffle(
         &player.sk,
         &player.pk,
         m_list,
-    ) {
-        Ok((public, proof)) => {
-            // println!("Proof: {:?}", proof);
+        link_v_seed,
+    )?;
 
-            // Dividir los datos públicos en fragmentos más pequeños
-            let chunk_size = 50; // Ajusta este valor según sea necesario
-            let serializable_public: Vec<String> = public.iter().map(|fr| fr.to_string()).collect();
-
-            // Enviar los datos en fragmentos
-            let chunks = serializable_public.chunks(chunk_size).collect::<Vec<_>>();
-            let length = chunks.len();
-
-            let serialized_chunks: Vec<Vec<u8>> = chunks
-                .iter()
-                .map(|chunk| serde_json::to_vec(chunk).unwrap_or_default())
-                .collect();
-
-            // let public_strings = deserializar_chunks_a_strings(serialized_chunks.clone())?;
-            // println!("Public strings: {:?}", public_strings);
-
-            for (i, chunk) in serialized_chunks.iter().enumerate() {
-                if let Err(e) = send_protocol_message(
-                    s,
-                    ProtocolMessage::ZKProofRemoveAndRemaskChunk(
-                        i as u8,
-                        length as u8,
-                        chunk.clone(),
-                    ),
-                ) {
-                    error!("Error sending zk proof chunk {}: {:?}", i, e);
-                    return Err(format!("{:?}", e).into());
-                }
-            }
-
-            // Enviar la prueba por separado
-            let proof_bytes = serialize_proof(&proof)?;
-            if let Err(e) =
-                send_protocol_message(s, ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes))
-            {
-                error!("Error sending zk proof: {:?}", e);
-                return Err(format!("{:?}", e).into());
-            }
-
-            if let Err(e) = s.provers.prover_reshuffle.reset_reshuffle_builder() {
-                error!("Failed to reset reshuffle builder: {:?}", e);
-            }
-
-            Ok((public, proof))
-        }
-        Err(e) => {
-            error!("Error remasking for reshuffle: {:?}", e);
-            Err(Box::new(e))
-        }
+    if !prove_output.verified {
+        error!("Lego reshuffle proof failed self-verification");
+        return Err("Lego reshuffle proof failed self-verification".into());
     }
+
+    let lego_proof = prove_output.proof;
+
+    // El bundle lego lleva los pubs dentro → solo se envía el JSON, sin chunks
+    // de `public` separados (a diferencia del Groth16 plano).
+    let proof_bytes = lego_proof.to_json_string().into_bytes();
+    if let Err(e) =
+        send_protocol_message(s, ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes))
+    {
+        error!("Error sending lego reshuffle proof: {:?}", e);
+        return Err(format!("{:?}", e).into());
+    }
+
+    Ok(lego_proof)
 }
