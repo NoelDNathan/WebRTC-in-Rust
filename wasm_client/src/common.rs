@@ -351,6 +351,19 @@ pub fn generate_precompute() -> Result<usize, JsValue> {
     Ok(len)
 }
 
+/// BENCH dev del 3.6: mide el tiempo (ms) de generar UNA precompute (witness +
+/// prove) SIN partida real, con la generadora del grupo como `shared_key` de
+/// relleno. Requiere `set_precompute_artifacts` previo. No toca el pool ni el
+/// estado del juego: solo prueba y descarta. Devuelve los milisegundos.
+#[wasm_bindgen]
+pub fn bench_precompute() -> Result<f64, JsValue> {
+    let poker_state =
+        get_poker_state().ok_or_else(|| JsValue::from_str("poker state not initialized"))?;
+    let s = poker_state.borrow();
+    crate::handle_poker_messages::bench_precompute_entry(&s)
+        .map_err(|e| JsValue::from_str(&format!("bench_precompute failed: {}", e)))
+}
+
 /// Create a new session (host)
 #[wasm_bindgen]
 pub async fn create_session(

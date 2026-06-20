@@ -2026,8 +2026,18 @@ pub fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
 /// de `r_prime` ni en el orden de argumentos del prove. Requiere `joint_pk` +
 /// `precompute_artifacts` ya seteados.
 pub fn build_precompute_entry(s: &PokerState) -> Result<PrecomputeEntry, Box<dyn Error>> {
-    let pp = s.pp.clone();
     let joint_pk = s.joint_pk.clone().ok_or(ERROR_JOINT_PK_NOT_SET)?;
+    build_precompute_entry_with_key(s, &joint_pk)
+}
+
+/// Núcleo de `build_precompute_entry` parametrizado por `shared_key` (= H del
+/// circuito). El camino normal pasa `joint_pk`; el bench (`bench_precompute_entry`)
+/// pasa la generadora del grupo para poder medir sin partida real.
+fn build_precompute_entry_with_key(
+    s: &PokerState,
+    shared_key: &PublicKey,
+) -> Result<PrecomputeEntry, Box<dyn Error>> {
+    let pp = s.pp.clone();
     let artifacts = s
         .precompute_artifacts
         .as_ref()
@@ -2043,7 +2053,7 @@ pub fn build_precompute_entry(s: &PokerState) -> Result<PrecomputeEntry, Box<dyn
     let out = CardProtocol::prove_precompute_lego(
         &r_prime,
         &pp,
-        &joint_pk,
+        shared_key,
         link_v_seed,
         &artifacts.circom_wasm,
         &artifacts.circom_r1cs,
@@ -2060,6 +2070,28 @@ pub fn build_precompute_entry(s: &PokerState) -> Result<PrecomputeEntry, Box<dyn
         link_v_seed,
         proof: out.proof,
     })
+}
+
+/// Reloj monotónico del navegador en ms (0.0 fuera de un contexto con `window`).
+pub fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
+
+/// BENCH dev del 3.6: mide el coste de generar UNA precompute (witness + prove)
+/// SIN partida real, usando la generadora del grupo como `shared_key` de relleno
+/// (un punto válido cualquiera: el circuito solo comprueba `r'_G + r'_H ==
+/// r'·(G+H)`, no que H sea el joint_pk agregado). Requiere `set_precompute_
+/// artifacts` previo. Devuelve milisegundos del prove completo.
+pub fn bench_precompute_entry(s: &PokerState) -> Result<f64, Box<dyn Error>> {
+    let shared_key = s.pp.enc_parameters.generator;
+    let t0 = now_ms();
+    let _entry = build_precompute_entry_with_key(s, &shared_key)?;
+    let ms = now_ms() - t0;
+    info!("[timing] bench precompute (witness+prove): {:.1} ms", ms);
+    Ok(ms)
 }
 
 /// Saca una entrada del pool para el turno; si está vacío, la genera en caliente
@@ -2108,6 +2140,7 @@ fn shuffle_remask_and_send(
         info!("DEBUG: usando {} r_prime del pool", r_prime.len());
     }
 
+    let t_residual = now_ms();
     let prove_output = CardProtocol::shuffle_and_remask2_lego(
         &permutation,
         &r_prime,
@@ -2116,6 +2149,10 @@ fn shuffle_remask_and_send(
         &new_deck,
         link_v_seed,
     )?;
+    info!(
+        "[timing] residual shuffle prove (lego): {:.1} ms",
+        now_ms() - t_residual
+    );
 
     if !prove_output.verified {
         error!("Lego shuffle proof failed self-verification");
@@ -2593,6 +2630,7 @@ fn send_remask_for_reshuffle(
         proof: precompute_proof,
     } = entry;
 
+    let t_residual = now_ms();
     let prove_output = CardProtocol::remask_for_reshuffle_lego(
         &r_prime,
         &s.pp,
@@ -2604,6 +2642,10 @@ fn send_remask_for_reshuffle(
         m_list,
         link_v_seed,
     )?;
+    info!(
+        "[timing] residual reshuffle prove (lego): {:.1} ms",
+        now_ms() - t_residual
+    );
 
     if !prove_output.verified {
         error!("Lego reshuffle proof failed self-verification");

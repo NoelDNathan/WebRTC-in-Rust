@@ -109,6 +109,7 @@ features = [
   "ProgressEvent",
   "HtmlButtonElement",
   "HtmlInputElement",
+  "Performance",
 ]
 
 [dev-dependencies]
