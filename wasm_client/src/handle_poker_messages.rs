@@ -2218,10 +2218,30 @@ fn shuffle_remask_and_send(
         &domain_sep,
     )?;
 
-    // TODO(capa 4 — frontend): el callback JS `verify_shuffling` (vía
-    // `format_proof_for_js`) alimentaba al frontend con el Groth16 plano para la
-    // tx on-chain. Con lego debe pasar `LegoLink + pubs` (ABI nueva de capa 2).
-    // Se reconecta junto con la capa 4 (acopla wasm_client ↔ frontend).
+    // Capa 4: expone el bundle Lego (residual + precompute, ambos con LegoLink +
+    // pubs) al frontend via el callback JS `verify_shuffling`. NO se envia ninguna
+    // tx aqui: en el modelo OPTIMISTA el happy-path se resuelve por consenso de
+    // firmas (startGameOptimistic, etc.) y la verificacion ZK on-chain es solo el
+    // ARBITRO DE DISPUTA. El frontend CACHEA este bundle y solo lo submitea
+    // (submitPrecompute + shufflingCards) si el consenso falla (fallback). arg1 =
+    // los 420 pubs del residual en JSON; arg2 = el bundle completo en JSON.
+    {
+        let pubs_json = format!(
+            "[{}]",
+            bundle
+                .residual
+                .pubs
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let pubs_js = JsValue::from_str(&pubs_json);
+        let bundle_js = JsValue::from_str(&bundle.to_json_string());
+        if let Err(e) = s.verify_shuffling.call2(&JsValue::NULL, &pubs_js, &bundle_js) {
+            warn!("callback JS verify_shuffling fallo (no fatal, solo cache): {:?}", e);
+        }
+    }
 
     if DEBUG_MODE {
         info!("DEBUG: shuffle_remask_and_send (lego) completed successfully");
