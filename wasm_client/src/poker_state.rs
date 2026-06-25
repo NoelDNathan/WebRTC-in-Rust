@@ -14,19 +14,22 @@ use zk_reshuffle::lego::LegoProofJson;
 use zk_reshuffle::CircomProver;
 
 /// Una entrada del pool de precompute (capa 3.4b paso 3): una proof generada en
-/// background con sus `r_prime` y `link_v_seed`. Al consumirla en el turno, el
-/// residual debe usar EXACTAMENTE estos `r_prime`/`link_v_seed` para que su
+/// background con sus `r_prime` y `link_v`. Al consumirla en el turno, el
+/// residual debe usar EXACTAMENTE estos `r_prime`/`link_v` para que su
 /// `link_d` coincida con el de la precompute (el enlace cp_link del pool).
+/// `link_v` son 32 bytes de entropia real (#1): el blinding del cp_link de ancho
+/// completo (`Fr`), NO una seed de 64 bits.
 #[derive(Clone)]
 pub struct PrecomputeEntry {
     pub r_prime: Vec<Scalar>,
-    pub link_v_seed: u64,
+    pub link_v: [u8; 32],
     pub proof: LegoProofJson,
 }
 
 /// Los 4 artefactos del precompute, fetcheados por JS al entrar a la sala
-/// (no se embeben: ~30 MB juntos). `circom_*` calculan el witness con ark-circom;
-/// `lego_*` (PK ~20 MB + `CircuitR1cs`) hacen el prove/verify cp_link.
+/// (no se embeben: ~30 MB juntos). `circom_wasm` + `circom_r1cs` calculan el
+/// witness con ark-circom; `lego_*` (PK ~20 MB + `CircuitR1cs`) hacen el
+/// prove/verify cp_link.
 #[derive(Clone, Default)]
 pub struct PrecomputeArtifacts {
     pub circom_wasm: Vec<u8>,

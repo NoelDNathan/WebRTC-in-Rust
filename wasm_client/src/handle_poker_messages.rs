@@ -2048,13 +2048,16 @@ fn build_precompute_entry_with_key(
     let r_prime: Vec<Scalar> = (0..52)
         .map(|_| Scalar::from(rng.gen_range(0..max_value)))
         .collect();
-    let link_v_seed: u64 = rng.gen();
+    // #1: link_v de ancho completo = 32 bytes del CSPRNG (StdRng sembrado por
+    // entropia del OS), NO una seed de 64 bits. Se persiste en la entrada para
+    // que el residual del turno reproduzca el MISMO link_d (enlace cp_link).
+    let link_v: [u8; 32] = rng.gen();
 
     let out = CardProtocol::prove_precompute_lego(
         &r_prime,
         &pp,
         shared_key,
-        link_v_seed,
+        &link_v,
         &artifacts.circom_wasm,
         &artifacts.circom_r1cs,
         &artifacts.lego_r1cs,
@@ -2067,7 +2070,7 @@ fn build_precompute_entry_with_key(
 
     Ok(PrecomputeEntry {
         r_prime,
-        link_v_seed,
+        link_v,
         proof: out.proof,
     })
 }
@@ -2112,6 +2115,22 @@ fn take_or_make_precompute(s: &mut PokerState) -> Result<PrecomputeEntry, Box<dy
     build_precompute_entry(s)
 }
 
+/// Chain id del despliegue para la separacion de dominio Fiat-Shamir (#5).
+/// TODO: parametrizar desde config/JS para multi-red; hoy fija la red destino.
+const FS_CHAIN_ID: u64 = 31337; // hardhat / red local por defecto
+
+/// Separador de dominio Fiat-Shamir (#5), reconstruible IDENTICO por prover y
+/// verifier desde el estado COMPARTIDO. Hoy ata (chain_id, game_id = room_id): una
+/// proof del shuffle NO se puede re-jugar en otra partida ni en otra red aunque
+/// sus public inputs coincidan. TODO(#5): atar ademas ronda (`current_dealer`) y
+/// shuffler (`current_shuffler`) cuando se confirme que prover y verifier los leen
+/// en el MISMO punto de la maquina de estados (necesita validacion en partida
+/// real); por eso van a 0 de momento, sin afectar el binding de chain/partida.
+fn fs_domain_sep(s: &PokerState) -> [u8; 32] {
+    let game_id = s.room_id.as_deref().unwrap_or("").as_bytes();
+    zk_reshuffle::lego::fs_domain_separator(FS_CHAIN_ID, game_id, 0, 0)
+}
+
 #[allow(non_snake_case)]
 fn shuffle_remask_and_send(
     s: &mut PokerState,
@@ -2132,13 +2151,17 @@ fn shuffle_remask_and_send(
     let entry = take_or_make_precompute(s)?;
     let PrecomputeEntry {
         r_prime,
-        link_v_seed,
+        link_v,
         proof: precompute_proof,
     } = entry;
 
     if DEBUG_MODE {
         info!("DEBUG: usando {} r_prime del pool", r_prime.len());
     }
+
+    // Separador de dominio FS (#5): el MISMO valor en el prove y en la
+    // verificacion local de abajo (y el que reconstruira el peer al recibir).
+    let domain_sep = fs_domain_sep(s);
 
     let t_residual = now_ms();
     let prove_output = CardProtocol::shuffle_and_remask2_lego(
@@ -2147,7 +2170,8 @@ fn shuffle_remask_and_send(
         &s.pp,
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         &new_deck,
-        link_v_seed,
+        &link_v,
+        &domain_sep,
     )?;
     info!(
         "[timing] residual shuffle prove (lego): {:.1} ms",
@@ -2191,6 +2215,7 @@ fn shuffle_remask_and_send(
         &s.joint_pk.as_ref().expect(ERROR_JOINT_PK_NOT_SET),
         &new_deck.to_vec(),
         &lego_proof,
+        &domain_sep,
     )?;
 
     // TODO(capa 4 — frontend): el callback JS `verify_shuffling` (vía
@@ -2385,6 +2410,11 @@ fn process_shuffle_verification_body(
         .clone();
     let mut rng = StdRng::from_entropy();
 
+    // Separador de dominio FS (#5) reconstruido del estado compartido: debe ser
+    // EL MISMO que uso el peer prover (mismo room_id/chain) o la re-derivacion de
+    // alpha/beta no cuadra y se rechaza (anti-replay entre contextos).
+    let domain_sep = fs_domain_sep(s);
+
     // Verifica la residual (cp_link + Fiat-Shamir + H/G/Ca/Cb contra el estado) y
     // reconstruye el mazo resultante desde Ca_out/Cb_out.
     let shuffled_deck = match CardProtocol::verify_shuffle_remask2_lego(
@@ -2392,6 +2422,7 @@ fn process_shuffle_verification_body(
         &joint_pk,
         &*deck,
         lego_proof,
+        &domain_sep,
     ) {
         Ok(shuffled_deck) => shuffled_deck,
         Err(e) => {
@@ -2626,7 +2657,7 @@ fn send_remask_for_reshuffle(
     let entry = take_or_make_precompute(s)?;
     let PrecomputeEntry {
         r_prime,
-        link_v_seed,
+        link_v,
         proof: precompute_proof,
     } = entry;
 
@@ -2640,7 +2671,7 @@ fn send_remask_for_reshuffle(
         &player.sk,
         &player.pk,
         m_list,
-        link_v_seed,
+        &link_v,
     )?;
     info!(
         "[timing] residual reshuffle prove (lego): {:.1} ms",

@@ -30,10 +30,15 @@ pkg-rayon/$(PKG_NAME)-rayon.js rayon:
 # `wasm-opt` viene en la cache de wasm-pack:
 #   ~/AppData/Local/.wasm-pack/wasm-opt-*/bin/wasm-opt.exe  (Windows)
 #   ~/.cache/.wasm-pack/wasm-opt-*/bin/wasm-opt             (Linux/Mac)
-WASM_OPT = $(firstword $(wildcard $(HOME)/AppData/Local/.wasm-pack/wasm-opt-*/bin/wasm-opt.exe $(HOME)/.cache/.wasm-pack/wasm-opt-*/bin/wasm-opt) wasm-opt)
 RAYON_WASM = pkg-rayon/$(PKG_NAME)_rayon_bg.wasm
 
+# OJO: la ruta de wasm-opt en la cache tiene espacios ("Noel Nathan"), asi que
+# hay que localizarla DENTRO del shell y entrecomillarla; un `$(firstword)` de
+# Make la parte por el espacio. Se busca en la cache de wasm-pack o en PATH.
 optimize-rayon:
 	cp $(RAYON_WASM) $(RAYON_WASM).noopt
-	"$(WASM_OPT)" -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals --enable-sign-ext $(RAYON_WASM).noopt -o $(RAYON_WASM)
+	WO=$$(ls -1 "$(HOME)"/AppData/Local/.wasm-pack/wasm-opt-*/bin/wasm-opt.exe "$(HOME)"/.cache/.wasm-pack/wasm-opt-*/bin/wasm-opt 2>/dev/null | head -1); \
+	[ -n "$$WO" ] || WO=wasm-opt; \
+	echo "usando wasm-opt: $$WO"; \
+	"$$WO" -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals --enable-sign-ext $(RAYON_WASM).noopt -o $(RAYON_WASM)
 	@echo "optimize-rayon OK -> copia pkg-rayon/* a frontend-production/public/pkg-rayon/"
