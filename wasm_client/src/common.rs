@@ -309,6 +309,27 @@ pub fn register_poker_callbacks(
 /// Cachea los 4 artefactos del precompute (fetcheados por JS al entrar a la sala:
 /// circom `.wasm` + circom `.r1cs` + PK lego + r1cs lego). Se llama una vez antes
 /// de `generate_precompute`. No se embeben porque pesan ~30 MB juntos.
+/// INV-2 (separación de dominio FS #5): fija el contexto on-chain con el que el
+/// facet reconstruye el domain_sep del shuffle. `diamond_address` = los 20 bytes
+/// crudos de la dirección del diamond (= `abi.encodePacked(address(this))`);
+/// `chain_id` = la red real (`block.chainid`). Sin esto, el fallback ZK on-chain
+/// NO verifica (el wasm usaría room_id + 31337, que no casan con el verifier).
+#[wasm_bindgen]
+pub fn set_onchain_context(diamond_address: Vec<u8>, chain_id: u64) {
+    if let Some(poker_state) = get_poker_state() {
+        let mut s = poker_state.borrow_mut();
+        s.fs_chain_id = chain_id;
+        s.fs_game_id = Some(diamond_address);
+        info!(
+            "on-chain context set: chain_id={}, gameId={} bytes",
+            chain_id,
+            s.fs_game_id.as_ref().map(|g| g.len()).unwrap_or(0)
+        );
+    } else {
+        error!("set_onchain_context: poker state not initialized");
+    }
+}
+
 #[wasm_bindgen]
 pub fn set_precompute_artifacts(
     circom_wasm: Vec<u8>,
@@ -888,6 +909,10 @@ fn create_poker_state() -> PokerState {
     PokerState {
         room_id: None,
         my_id: None,
+        // INV-2: 31337 (hardhat) por defecto; el frontend lo sobrescribe con la red
+        // real vía set_onchain_context. fs_game_id None hasta fijar el diamond.
+        fs_chain_id: 31337,
+        fs_game_id: None,
         pp,
         my_name: None,
         my_name_bytes: None,

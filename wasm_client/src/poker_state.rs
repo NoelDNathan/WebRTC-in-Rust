@@ -129,6 +129,14 @@ pub struct PokerState {
     pub room_id: Option<String>,
     pub my_id: Option<String>,
 
+    // INV-2 (separación de dominio FS #5): contexto on-chain con el que el facet
+    // reconstruye el domain_sep. `fs_game_id` = bytes de la dirección del diamond
+    // (= abi.encodePacked(address(this)) en Solidity); `fs_chain_id` = la red real.
+    // Si `fs_game_id` es None se cae a `room_id` (NO casa con el verifier on-chain).
+    // Los fija `set_onchain_context` desde el frontend.
+    pub fs_chain_id: u64,
+    pub fs_game_id: Option<Vec<u8>>,
+
     pub pp: CardParameters,
 
     pub my_name: Option<String>,

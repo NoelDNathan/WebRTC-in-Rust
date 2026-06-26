@@ -2115,20 +2115,26 @@ fn take_or_make_precompute(s: &mut PokerState) -> Result<PrecomputeEntry, Box<dy
     build_precompute_entry(s)
 }
 
-/// Chain id del despliegue para la separacion de dominio Fiat-Shamir (#5).
-/// TODO: parametrizar desde config/JS para multi-red; hoy fija la red destino.
-const FS_CHAIN_ID: u64 = 31337; // hardhat / red local por defecto
-
 /// Separador de dominio Fiat-Shamir (#5), reconstruible IDENTICO por prover y
-/// verifier desde el estado COMPARTIDO. Hoy ata (chain_id, game_id = room_id): una
-/// proof del shuffle NO se puede re-jugar en otra partida ni en otra red aunque
-/// sus public inputs coincidan. TODO(#5): atar ademas ronda (`current_dealer`) y
-/// shuffler (`current_shuffler`) cuando se confirme que prover y verifier los leen
-/// en el MISMO punto de la maquina de estados (necesita validacion en partida
-/// real); por eso van a 0 de momento, sin afectar el binding de chain/partida.
+/// verifier. INV-2: para que el fallback ZK verifique ON-CHAIN, el `game_id` DEBE
+/// ser los bytes que reconstruye el facet (`abi.encodePacked(address(this))` del
+/// diamond) y el `chain_id` la red real; ambos los fija `set_onchain_context`. Si
+/// no estan fijados se cae a `room_id` (solo sirve para la verificacion P2P; NO
+/// casa con el verifier on-chain). TODO(#5): atar ademas ronda y shuffler reales
+/// cuando se confirme que prover y verifier los leen en el MISMO punto de la
+/// maquina de estados; por eso van a 0 (igual que `_shuffleDomainSep` del facet).
 fn fs_domain_sep(s: &PokerState) -> [u8; 32] {
-    let game_id = s.room_id.as_deref().unwrap_or("").as_bytes();
-    zk_reshuffle::lego::fs_domain_separator(FS_CHAIN_ID, game_id, 0, 0)
+    match s.fs_game_id.as_deref() {
+        Some(game_id) => zk_reshuffle::lego::fs_domain_separator(s.fs_chain_id, game_id, 0, 0),
+        None => {
+            warn!(
+                "fs_domain_sep: contexto on-chain sin fijar (set_onchain_context); \
+                 usando room_id — NO casara con el verifier on-chain"
+            );
+            let game_id = s.room_id.as_deref().unwrap_or("").as_bytes();
+            zk_reshuffle::lego::fs_domain_separator(s.fs_chain_id, game_id, 0, 0)
+        }
+    }
 }
 
 #[allow(non_snake_case)]
