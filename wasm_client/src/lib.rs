@@ -2,6 +2,7 @@ mod common;
 mod handle_frontend_messages;
 mod handle_poker_messages;
 mod ice;
+mod log_filter;
 mod poker_state;
 mod snapshot;
 mod sdp;
@@ -28,7 +29,8 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 pub async fn start() {
     set_panic_hook();
 
-    wasm_logger::init(wasm_logger::Config::new(log::Level::Debug));
+    // Logger filtrado: solo precompute y tiempos (+ avisos/errores).
+    log_filter::init();
 
     let state: Rc<RefCell<AppState>> = Rc::new(RefCell::new(AppState::new()));
 

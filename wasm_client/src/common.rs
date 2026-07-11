@@ -5,7 +5,7 @@ use std::convert::TryInto;
 use std::rc::Rc;
 
 use crate::handle_poker_messages::{
-    dealt_cards, get_peer_id, handle_poker_message, is_dealer, NUM_PLAYERS_EXPECTED,
+    get_peer_id, handle_poker_message, is_dealer, NUM_PLAYERS_EXPECTED,
 };
 use crate::poker_state::PlayerInfo;
 use barnett_smart_card_protocol::BarnettSmartProtocol;
@@ -149,11 +149,21 @@ pub fn poker_reveal_all_cards() {
 }
 
 #[wasm_bindgen]
+pub fn poker_reveal_private_cards_players() {
+    info!("poker_reveal_private_cards_players");
+    if let Some(state) = get_poker_state() {
+        frontend_msgs::reveal_private_cards_players(state);
+    } else {
+        error!("poker_reveal_private_cards_players: no state");
+    }
+}
+
+#[wasm_bindgen]
 pub fn poker_reset_for_new_game() {
     info!("poker_reset_for_new_game");
     if let Some(state) = get_poker_state() {
         // Use a scope to ensure borrow is released even on panic
-        let result = {
+        let (should_deal_cards, is_dealer_check) = {
             let mut s = state.borrow_mut();
             s.reset_for_new_game();
 
@@ -176,21 +186,18 @@ pub fn poker_reset_for_new_game() {
             info!("is_dealer_check: {}", is_dealer_check);
             info!("should_deal_cards: {}", should_deal_cards);
 
-            if should_deal_cards && is_dealer_check {
-                info!("All players connected after reset, starting game");
-                dealt_cards(&mut *s)
-            } else {
-                Ok(())
-            }
+            (should_deal_cards, is_dealer_check)
         };
 
-        match result {
-            Ok(_) => {
-                info!("poker_reset_for_new_game: completed successfully");
-            }
-            Err(e) => {
-                error!("poker_reset_for_new_game: failed: {:?}", e);
-            }
+        if should_deal_cards && is_dealer_check {
+            info!("All players connected after reset, starting game");
+            // Mismo mecanismo diferido que en la agregación de claves: si el pool
+            // (conservado por el reset, Fase A) ya tiene entradas, reparte de
+            // inmediato; si la mano anterior lo dejó a cero, espera sin bloquear
+            // a que la generación de fondo termine una (con tope → hot-gen).
+            crate::handle_poker_messages::schedule_dealt_cards_when_pool_ready(state);
+        } else {
+            info!("poker_reset_for_new_game: completed successfully");
         }
     } else {
         error!("poker_reset_for_new_game: no state");
@@ -336,40 +343,246 @@ pub fn set_precompute_artifacts(
     circom_r1cs: Vec<u8>,
     lego_pk: Vec<u8>,
     lego_r1cs: Vec<u8>,
+    graph: Vec<u8>,
 ) {
     if let Some(poker_state) = get_poker_state() {
         let mut s = poker_state.borrow_mut();
-        s.precompute_artifacts = Some(PrecomputeArtifacts {
+        let has_graph = !graph.is_empty();
+        s.precompute_artifacts = Some(std::sync::Arc::new(PrecomputeArtifacts {
             circom_wasm,
             circom_r1cs,
             lego_pk,
             lego_r1cs,
-        });
-        info!("Precompute artifacts set");
+            graph,
+        }));
+        info!("Precompute artifacts set (graph witness: {})", has_graph);
     } else {
         error!("set_precompute_artifacts: poker state not initialized");
     }
 }
 
-/// Genera UNA entrada de precompute en background y la añade al pool; devuelve el
-/// tamaño del pool resultante. Requiere `set_precompute_artifacts` + `joint_pk`
-/// previos. CPU-intensivo (PK ~20 MB): conviene llamarlo desde un Web Worker.
-/// La entrada guarda sus `r_prime`/`link_v_seed` para que el residual del turno
-/// los reutilice (mismo `link_d` = enlace del pool).
+/// Drena el buzón worker->main (`precompute_ready`) hacia el pool. Devuelve el
+/// nuevo tamaño del pool. Trabaja sobre un `&mut PokerState` YA prestado, así que lo
+/// puede llamar tanto JS (`drain_precompute_ready`) como el propio path del turno en
+/// Rust (`take_or_make_precompute`) — esto último es clave: desacopla el consumo del
+/// lazo JS, que la partida starvea con sus proves síncronos en el hilo principal.
+pub(crate) fn drain_ready_into_pool(s: &mut crate::poker_state::PokerState) -> usize {
+    // Clonamos el handle del buzón para no chocar con el &mut de `precompute_pool`.
+    let ready = s.precompute_ready.clone();
+    let drained: Vec<_> = {
+        let mut q = match ready.lock() {
+            Ok(q) => q,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut *q)
+    };
+    if !drained.is_empty() {
+        let n = drained.len();
+        s.precompute_pool.extend(drained);
+        info!("drain precompute: +{} -> pool = {}", n, s.precompute_pool.len());
+    }
+    s.precompute_pool.len()
+}
+
+/// Objetivo del pool en el lado Rust (mismo valor que `DEFAULT_POOL_TARGET` del
+/// frontend). El relleno de fondo genera hasta cubrirlo SIN depender del lazo JS:
+/// durante la partida el main está ocupado con los proves del turno y el
+/// `setTimeout` de JS no llega a correr (starvation), así que la reposición debe
+/// ser autónoma dentro del wasm.
+pub(crate) const PRECOMPUTE_POOL_TARGET: usize = 5;
+
+/// Pausa entre entradas del relleno de fondo (plan §6c, palanca 1). Sin pausa,
+/// el k-loop encadena ~5 proves seguidos (~90 s de CPU al 100% en 8 hilos) y el
+/// throttling térmico + la contención con el prove del turno multiplican el
+/// coste por entrada (medido: 4,7 s ocioso → 13-26 s en partida). El pool es
+/// trabajo de fondo: tardar más en llenarse no afecta a la mano en curso (solo
+/// la 1ª entrada es latencia-crítica y esa NO se pausa).
+pub(crate) const PRECOMPUTE_REFILL_PACING_MS: u64 = 4_000;
+
+/// Tope de la espera del k-loop cuando el turno está probando (`turn_proving`).
+/// La puerta D3 cede paso al turno, pero con tope: si el flag quedara alzado más
+/// de esto (no debería — lo baja un guard RAII), el relleno continúa igualmente
+/// para no dejar el pool sin reponer.
+pub(crate) const TURN_PROVING_MAX_WAIT_MS: u64 = 30_000;
+
+/// Guard RAII de la puerta D3 "turno probando una mano". Alza `turn_proving` al
+/// crearse y lo baja SIEMPRE al salir de ámbito (también en los `?` de error),
+/// de modo que el k-loop de fondo no arranque una entrada nueva mientras el main
+/// está con el residual/hot-gen del turno. No preempta un prove de fondo ya en
+/// marcha (D3 acepta ese solape).
+pub(crate) struct TurnProvingGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl TurnProvingGuard {
+    pub(crate) fn new(flag: &std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(flag.clone())
+    }
+}
+
+impl Drop for TurnProvingGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Dispara el relleno del pool de precompute **en un worker** (`rayon::spawn`, D2)
+/// a partir de un `&PokerState` ya prestado, sin bloquear el hilo principal y sin
+/// re-tomar el `thread_local`. El worker genera entradas UNA A UNA hasta cubrir
+/// `PRECOMPUTE_POOL_TARGET` (contando pool + buzón) y va dejando cada una en el
+/// buzón `precompute_ready` (la recoge `drain_ready_into_pool` en cuanto el main
+/// toca el estado). No-op si faltan `artifacts`/`joint_pk` o si ya hay un relleno
+/// en vuelo (D3, `precompute_inflight`). Lo llaman: la agregación de claves (head
+/// start al fijarse `joint_pk`), el path del turno tras consumir, y JS
+/// (`generate_precompute`) como topador extra.
+pub(crate) fn spawn_background_precompute(s: &crate::poker_state::PokerState) {
+    use std::sync::atomic::Ordering;
+
+    // Snapshot Send-safe de inputs. La PK ~20 MB va por `Arc` (clon barato, sin copia).
+    let (artifacts, joint_pk) = match (s.precompute_artifacts.clone(), s.joint_pk.clone()) {
+        (Some(a), Some(j)) => (a, j),
+        _ => return, // aún no hay artefactos o joint_pk: nada que generar
+    };
+    let pp = s.pp.clone();
+    let ready = s.precompute_ready.clone();
+    let inflight = s.precompute_inflight.clone();
+    let turn_proving = s.turn_proving.clone();
+
+    // Cuántas faltan para el objetivo, contando las ya listas en el buzón (aún
+    // sin drenar). Snapshot en el momento del spawn: si el juego consume mientras
+    // el worker rellena, el próximo consumo re-dispara y se topa entonces.
+    let ready_len = match ready.lock() {
+        Ok(q) => q.len(),
+        Err(poisoned) => poisoned.into_inner().len(),
+    };
+    let missing = PRECOMPUTE_POOL_TARGET.saturating_sub(s.precompute_pool.len() + ready_len);
+    if missing == 0 {
+        return;
+    }
+
+    // D3: un solo relleno de fondo en vuelo. Si ya hay uno, no lanzamos otro.
+    if inflight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    #[cfg(feature = "rayon")]
+    {
+        rayon::spawn(move || {
+            for i in 0..missing {
+                // Pacing (plan §6c, palanca 1): medido en partida real que 5 proves
+                // back-to-back (~90 s de CPU al 100% en 8 hilos) disparan throttling
+                // térmico y contención — el MISMO prove pasa de 4,7 s (ocioso) a
+                // 13-26 s. Una pausa entre entradas deja enfriar la CPU y cede paso
+                // al prove del turno. NO se pausa antes de la PRIMERA entrada: la
+                // mano 1 está esperándola (deal diferido). `thread::sleep` es válido
+                // aquí porque los workers de rayon son web workers (atomic.wait
+                // permitido); NUNCA moverlo al main thread.
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        PRECOMPUTE_REFILL_PACING_MS,
+                    ));
+                }
+                // Puerta D3: si el turno está probando una mano (residual/hot-gen
+                // en el main), esperamos a que termine antes de arrancar la
+                // siguiente entrada de fondo — con tope, y también en la 1ª
+                // entrada (sin riesgo de interbloqueo: el flag lo baja un guard
+                // RAII al final de una sección síncrona que siempre termina).
+                {
+                    let mut waited_ms: u64 = 0;
+                    while turn_proving.load(Ordering::SeqCst)
+                        && waited_ms < TURN_PROVING_MAX_WAIT_MS
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        waited_ms += 250;
+                    }
+                    if waited_ms > 0 {
+                        info!(
+                            "[bg] puerta D3: relleno esperó {} ms al prove del turno",
+                            waited_ms
+                        );
+                    }
+                }
+                let t_bg = crate::handle_poker_messages::now_ms();
+                match crate::handle_poker_messages::build_precompute_entry_parts(
+                    &pp, &joint_pk, &artifacts,
+                ) {
+                    Ok(entry) => {
+                        match ready.lock() {
+                            Ok(mut q) => q.push(entry),
+                            Err(poisoned) => poisoned.into_inner().push(entry),
+                        }
+                        info!(
+                            "[bg][timing] precompute {}/{} (witness+prove) {:.1} ms; lista en el buzón",
+                            i + 1,
+                            missing,
+                            crate::handle_poker_messages::now_ms() - t_bg
+                        );
+                    }
+                    Err(e) => {
+                        error!("[bg] spawn_background_precompute (worker) falló: {}", e);
+                        break;
+                    }
+                }
+            }
+            inflight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        // Sin rayon (build de un solo hilo): generamos síncrono aquí y al buzón.
+        match crate::handle_poker_messages::build_precompute_entry_parts(&pp, &joint_pk, &artifacts)
+        {
+            Ok(entry) => {
+                if let Ok(mut q) = ready.lock() {
+                    q.push(entry);
+                }
+            }
+            Err(e) => error!("spawn_background_precompute (sync) falló: {}", e),
+        }
+        inflight.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Dispara la generación de UNA entrada de precompute **en un worker** (D2), sin
+/// bloquear el hilo principal, y devuelve YA el tamaño ACTUAL del pool (aún sin la
+/// nueva entrada). Requiere `set_precompute_artifacts` + `joint_pk` previos. D3:
+/// solo una generación de fondo en vuelo a la vez. La entrada guarda sus
+/// `r_prime`/`link_v` para que el residual del turno los reutilice (mismo `link_d`).
 #[wasm_bindgen]
 pub fn generate_precompute() -> Result<usize, JsValue> {
     let poker_state =
         get_poker_state().ok_or_else(|| JsValue::from_str("poker state not initialized"))?;
-    let mut s = poker_state.borrow_mut();
+    let s = poker_state.borrow();
+    if s.precompute_artifacts.is_none() {
+        return Err(JsValue::from_str("precompute artifacts not set"));
+    }
+    if s.joint_pk.is_none() {
+        return Err(JsValue::from_str("joint_pk not set"));
+    }
+    spawn_background_precompute(&s);
+    Ok(s.precompute_pool.len())
+}
 
-    // La criptografía vive en `build_precompute_entry` (handle_poker_messages),
-    // compartida con el fallback en-caliente del turno para no divergir.
-    let entry = crate::handle_poker_messages::build_precompute_entry(&s)
-        .map_err(|e| JsValue::from_str(&format!("generate_precompute failed: {}", e)))?;
-    s.precompute_pool.push(entry);
-    let len = s.precompute_pool.len();
-    info!("Precompute generated; pool size = {}", len);
-    Ok(len)
+/// Drena el buzón worker->main hacia el pool y devuelve el nuevo tamaño. El main lo
+/// sondea desde JS para recoger entradas listas; el path del turno también drena por
+/// su cuenta (ver `drain_ready_into_pool`), así que esto es solo un topador extra.
+#[wasm_bindgen]
+pub fn drain_precompute_ready() -> usize {
+    if let Some(poker_state) = get_poker_state() {
+        let mut s = poker_state.borrow_mut();
+        drain_ready_into_pool(&mut s)
+    } else {
+        0
+    }
+}
+
+/// Tamaño actual del pool de precompute. Lo usa el relleno JS para "topar hasta N"
+/// (D4) en vez de "añadir N a ciegas". Barato: solo un borrow y `.len()`.
+#[wasm_bindgen]
+pub fn pool_len() -> usize {
+    get_poker_state()
+        .map(|ps| ps.borrow().precompute_pool.len())
+        .unwrap_or(0)
 }
 
 /// BENCH dev del 3.6: mide el tiempo (ms) de generar UNA precompute (witness +
@@ -647,29 +860,20 @@ async fn setup_rtc_peer_connection_ice_callbacks_react(
 }
 
 async fn setup_data_channel_listener(peer_connection: RtcPeerConnection) -> Result<(), JsValue> {
-    info!("🔧 Setting up data channel listener");
 
     let peer_clone = peer_connection.clone();
-    info!(
-        "📡 Peer connection signaling state: {:?}",
-        peer_clone.signaling_state()
-    );
     let ondatachannel_callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
         let dc = ev.channel();
-        info!("📺 Incoming data channel received: {}", dc.label());
-        info!("📊 Data channel ready state: {:?}", dc.ready_state());
 
         if let Err(e) = setup_data_channel_callbacks(dc, peer_clone.clone()) {
             error!("❌ Error setting up data channel callbacks: {:?}", e);
         } else {
-            info!("✅ Data channel callbacks set up successfully");
         }
     }) as Box<dyn FnMut(RtcDataChannelEvent)>);
 
     peer_connection.set_ondatachannel(Some(ondatachannel_callback.as_ref().unchecked_ref()));
     ondatachannel_callback.forget();
 
-    info!("✅ Data channel listener setup complete");
     Ok(())
 }
 
@@ -677,24 +881,12 @@ fn setup_data_channel_callbacks(
     data_channel: RtcDataChannel,
     peer_connection: RtcPeerConnection,
 ) -> Result<(), JsValue> {
-    info!("🔧 Setting up data channel callbacks");
-    info!("📺 Data channel label: {:?}", data_channel.label());
-    info!(
-        "📡 Peer connection signaling state: {:?}",
-        peer_connection.signaling_state()
-    );
-    info!(
-        "📊 Data channel ready state: {:?}",
-        data_channel.ready_state()
-    );
 
     let dc_clone = data_channel.clone();
     let peer_clone = peer_connection.clone();
-    info!("Peer id: {:?}", get_peer_id(dc_clone.clone()));
     // Add onopen callback to increment num_players_connected when data channel opens
     let dc_onopen = data_channel.clone();
     let peer_onopen = peer_connection.clone();
-    info!("Peer id onopen: {:?}", get_peer_id(dc_onopen.clone()));
 
     let onopen_callback = Closure::wrap(Box::new(move |_event: JsValue| {
         info!("Data channel opened successfully");
@@ -706,7 +898,6 @@ fn setup_data_channel_callbacks(
 
                 // Add player to players_connected with basic info
                 let peer_id = get_peer_id(dc_onopen.clone());
-                info!("Peer id: {:?}", peer_id);
                 let temp_player_info = PlayerInfo {
                     peer_connection: peer_onopen.clone(),
                     data_channel: dc_onopen.clone(),
@@ -725,7 +916,6 @@ fn setup_data_channel_callbacks(
                     "Player connected via data channel. Total players: {}",
                     s.players_info.len()
                 );
-                info!("Players info: {:?}", s.players_info);
             }
 
             notify_poker_state_changed();
@@ -740,12 +930,8 @@ fn setup_data_channel_callbacks(
     let peer_clone_rc = Rc::new(peer_clone);
 
     let onmessage_callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
-        info!("📨 Data channel message received");
-        info!("📊 Message data type: {:?}", ev.data());
-        info!("📝 Message content: {:?}", ev.data().as_string());
 
         if let Some(message) = ev.data().as_string() {
-            info!("🔄 Queuing poker protocol message for async processing...");
             if let Some(poker_state) = get_poker_state() {
                 // Clone the Rc references (cheap clone, doesn't move)
                 let dc_clone_for_task = dc_clone_rc.clone();
@@ -921,6 +1107,7 @@ fn create_poker_state() -> PokerState {
         joint_pk: None,
         card_mapping: None,
         pending_initial_cards: None,
+        last_initial_cards: None,
         pending_public_key_infos: Vec::new(),
         deck: None,
         provers: provers,
@@ -956,6 +1143,9 @@ fn create_poker_state() -> PokerState {
         is_all_public_shuffle_bytes_received: false,
         precompute_artifacts: None,
         precompute_pool: Vec::new(),
+        precompute_ready: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        precompute_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        turn_proving: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         my_revealed_cards: [None, None],
         revealed_community_cards: [None, None, None, None, None],
     }
@@ -1062,14 +1252,12 @@ pub async fn handle_message_reply(
             }
         }
         SignalEnum::VideoAnswer(answer, _) => {
-            info!("Video Answer Received! {}", answer);
             crate::sdp::receive_sdp_answer(peer_connection.clone(), answer).await?;
         }
         SignalEnum::IceCandidate(candidate, _) => {
             crate::ice::received_new_ice_candidate(candidate, peer_connection.clone()).await?;
         }
         SignalEnum::SessionReady(session_id) => {
-            info!("SessionReady Received ! {:?}", session_id);
             let mut state = app_state.borrow_mut();
             state.set_session_id(session_id.clone());
             drop(state);
@@ -1148,7 +1336,6 @@ pub async fn handle_message_reply(
             });
         }
         SignalEnum::NewUser(user_id) => {
-            info!("New User Received ! {}", user_id.clone().inner());
             let mut state = app_state.borrow_mut();
             state.set_user_id(user_id);
         }
@@ -1158,7 +1345,6 @@ pub async fn handle_message_reply(
         }
         SignalEnum::TextMessage(data, session_id) => {
             if let Ok(text) = String::from_utf8(data) {
-                info!("Received text message: {}", text);
                 notify_message_received("Peer", &text);
             } else {
                 error!("Received invalid UTF-8 text message");

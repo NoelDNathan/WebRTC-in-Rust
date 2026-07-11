@@ -9,6 +9,8 @@ use texas_holdem::{
 
 use log::error;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use web_sys::{RtcDataChannel, RtcPeerConnection};
 use zk_reshuffle::lego::LegoProofJson;
 use zk_reshuffle::CircomProver;
@@ -26,7 +28,7 @@ pub struct PrecomputeEntry {
     pub proof: LegoProofJson,
 }
 
-/// Los 4 artefactos del precompute, fetcheados por JS al entrar a la sala
+/// Los artefactos del precompute, fetcheados por JS al entrar a la sala
 /// (no se embeben: ~30 MB juntos). `circom_wasm` + `circom_r1cs` calculan el
 /// witness con ark-circom; `lego_*` (PK ~20 MB + `CircuitR1cs`) hacen el
 /// prove/verify cp_link.
@@ -36,6 +38,10 @@ pub struct PrecomputeArtifacts {
     pub circom_r1cs: Vec<u8>,
     pub lego_pk: Vec<u8>,
     pub lego_r1cs: Vec<u8>,
+    /// `.graph` de witnesscalc (build-circuit) del MISMO circuito: witness ~4x
+    /// más rápido con wires idénticos. VACÍO = usar el intérprete ark-circom
+    /// (circom_wasm + circom_r1cs) de siempre.
+    pub graph: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -146,6 +152,16 @@ pub struct PokerState {
     pub joint_pk: Option<PublicKey>,
     pub card_mapping: Option<HashMap<Card, ClassicPlayingCard>>,
     pub pending_initial_cards: Option<Vec<Card>>,
+    /// Última lista de cartas iniciales recibida/generada (las del `EncodedCards`
+    /// del dealer). El mazo "encoded" es determinista a partir de esto + `joint_pk`
+    /// (masking con r=1), así que sirve para RECONSTRUIR `deck` si una prueba de
+    /// shuffle llega cuando el mazo es `None`. NO se borra en `reset_for_new_game`:
+    /// el canal de datos P2P es ordenado, así que el `EncodedCards` del juego
+    /// siguiente siempre llega antes que su prueba de shuffle, garantizando que
+    /// este campo refleje el juego correcto cuando se use como fallback. Cura la
+    /// carrera de reinicio en la que el reset local borra el mazo que el dealer
+    /// ya había vuelto a repartir para la mano siguiente.
+    pub last_initial_cards: Option<Vec<Card>>,
     pub pending_public_key_infos: Vec<(RtcPeerConnection, RtcDataChannel, PublicKeyInfoEncoded)>,
     pub deck: Option<Vec<MaskedCard>>,
     pub provers: Provers,
@@ -191,8 +207,27 @@ pub struct PokerState {
     // Pool de precompute LegoGroth16 (capa 3.4b paso 3). `precompute_artifacts`
     // se setea una vez (fetch JS); `precompute_pool` se rellena en background y se
     // consume 1 entrada por barajado/remask propio.
-    pub precompute_artifacts: Option<PrecomputeArtifacts>,
+    //
+    // `precompute_artifacts` en `Arc` (Send+Sync) para que la generación de fondo
+    // (D2) capture la PK ~20 MB en la closure de `rayon::spawn` SIN copiarla y sin
+    // tocar el `thread_local Rc` (inaccesible desde el worker). Ver
+    // docs/precompute-pool-refill-plan.md (Fase D2).
+    pub precompute_artifacts: Option<Arc<PrecomputeArtifacts>>,
     pub precompute_pool: Vec<PrecomputeEntry>,
+    // Buzón de hand-off worker->main: la closure de `rayon::spawn` (en un Web
+    // Worker) empuja aquí la entrada ya probada; el main la drena hacia
+    // `precompute_pool` en un poll barato (`drain_precompute_ready`). Evita
+    // depender de wakers de Future entre hilos.
+    pub precompute_ready: Arc<Mutex<Vec<PrecomputeEntry>>>,
+    // `true` mientras hay UNA generación de fondo en vuelo (D3: no lanzar otra ni
+    // saturar el pool de rayon mientras un turno prueba). La baja la propia closure
+    // al terminar. `Arc` para compartirla con el worker.
+    pub precompute_inflight: Arc<AtomicBool>,
+    // `true` mientras el TURNO está probando una mano en el main (residual del
+    // shuffle/reshuffle o hot-gen). Puerta D3: el k-loop de fondo NO arranca la
+    // siguiente entrada mientras esté alzado (espera acotada en el worker). Lo
+    // alza/baja el guard RAII `TurnProvingGuard` (common.rs) — nunca a mano.
+    pub turn_proving: Arc<AtomicBool>,
 
     // Store revealed cards for score calculation
     pub my_revealed_cards: [Option<ClassicPlayingCard>; 2],
@@ -218,8 +253,10 @@ impl PokerState {
         self.public_shuffle_bytes = Vec::new();
         self.proof_shuffle_bytes = Vec::new();
         self.is_all_public_shuffle_bytes_received = false;
-        // El pool se consume por partida; los artefactos (fetch caro) se conservan.
-        self.precompute_pool = Vec::new();
+        // El pool NO se vacía aquí: las entradas solo dependen del `joint_pk`, que el
+        // reset conserva. La invalidación del pool vive en `set_joint_pk` (clear-then-fill
+        // cuando entra una clave nueva). Vaciarlo aquí forzaba hot-gen (~8 s) al arrancar
+        // la mano N+1. Ver docs/precompute-pool-refill-plan.md (Fase A).
         self.my_revealed_cards = [None, None];
         self.revealed_community_cards = [None, None, None, None, None];
 

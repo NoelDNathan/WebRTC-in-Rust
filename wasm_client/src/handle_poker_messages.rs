@@ -1,4 +1,4 @@
-use crate::poker_state::{PlayerInfo, PokerState, PrecomputeEntry};
+use crate::poker_state::{PlayerInfo, PokerState, PrecomputeArtifacts, PrecomputeEntry};
 use ark_ff::to_bytes;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use js_sys::{Object, Reflect};
@@ -124,24 +124,24 @@ pub fn handle_poker_message(
     data_channel: RtcDataChannel,
     peer_connection: RtcPeerConnection,
 ) {
-    info!("🔄 Processing poker protocol message");
-    info!("📝 Raw message: {}", message);
+    // Drenaje oportunista del buzón worker->main: durante la partida el lazo de
+    // sondeo JS está starveado por los proves síncronos, así que cada mensaje
+    // P2P es una ocasión barata (lock + vec vacío casi siempre) de pasar las
+    // entradas terminadas del buzón al pool antes de procesar el mensaje.
+    {
+        let mut s = state.borrow_mut();
+        crate::common::drain_ready_into_pool(&mut s);
+    }
 
     // Deserializar el mensaje del protocolo
     if let Ok(protocol_msg) = serde_json_wasm::from_str::<ProtocolMessage>(&message) {
-        info!(
-            "✅ Successfully deserialized protocol message: {:?}",
-            std::mem::discriminant(&protocol_msg)
-        );
         match protocol_msg {
             // ProtocolMessage::Text(data) => {
             //     if let Ok(text) = String::from_utf8(data) {
-            //         info!("Received text message: {}", text);
             //         add_message_to_chat(&format!("Peer: {}", text));
             //     }
             // }
             ProtocolMessage::PublicKeyInfo(public_key_info) => {
-                info!("Received public key info");
                 handle_public_key_info_received(
                     state,
                     peer_connection,
@@ -150,26 +150,21 @@ pub fn handle_poker_message(
                 )
             }
             // ProtocolMessage::PlayerId(player_id) => {
-            //     info!("Received player id: {}", player_id);
             //     handle_player_id_received(state, peer_connection, player_id);
             // }
             ProtocolMessage::RevealToken(id, reveal_token1_bytes, reveal_token2_bytes) => {
-                info!("Received reveal token");
                 handle_reveal_token_received(state, id, reveal_token1_bytes, reveal_token2_bytes);
             }
             ProtocolMessage::RevealTokenCommunityCards(reveal_token_bytes, index_bytes) => {
-                info!("Received reveal token community cards");
                 handle_reveal_token_community_cards_received(state, reveal_token_bytes, index_bytes)
             }
 
             ProtocolMessage::EncodedCards(data) => {
-                info!("Received encoded cards");
                 if let Err(e) = handle_encoded_cards_received(state, data) {
                     error!("Error handling encoded cards: {:?}", e);
                 }
             }
             ProtocolMessage::ShuffledAndRemaskedCards(remasked_bytes, proof_bytes) => {
-                info!("Received shuffled and remasked cards");
                 // Legacy??
                 if let Err(e) =
                     handle_shuffled_and_remasked_cards_received(state, remasked_bytes, proof_bytes)
@@ -178,35 +173,24 @@ pub fn handle_poker_message(
                 }
             }
             ProtocolMessage::RevealAllCards(reveal_all_cards_bytes) => {
-                info!("Received reveal all cards");
                 if let Err(e) = handle_reveal_all_cards_received(state, reveal_all_cards_bytes) {
                     error!("Error handling reveal all cards: {:?}", e);
                 }
             }
             ProtocolMessage::ZKProofRemoveAndRemaskChunk(i, length, chunk) => {
                 // Handle ZK proof remove and remask chunk
-                info!(
-                    "Received ZK proof remove and remask chunk: i={}, length={}",
-                    i, length
-                );
                 handle_zk_proof_remove_and_remask_chunk_received(state, i, length, chunk);
             }
             ProtocolMessage::ZKProofRemoveAndRemaskProof(proof_bytes) => {
                 // Handle ZK proof remove and remask proof
-                info!("Received ZK proof remove and remask proof");
                 handle_zk_proof_remove_and_remask_proof_received(state, proof_bytes);
             }
             ProtocolMessage::ZKProofShuffleChunk(i, length, chunk) => {
                 // Handle ZK proof shuffle chunk
-                info!(
-                    "Received ZK proof shuffle chunk: i={}, length={}",
-                    i, length
-                );
                 handle_zk_proof_shuffle_chunk_received(state, i, length, chunk);
             }
             ProtocolMessage::ZKProofShuffleProof(proof_bytes) => {
                 // Handle ZK proof shuffle proof
-                info!("Received ZK proof shuffle proof");
                 handle_zk_proof_shuffle_proof_received(state, proof_bytes);
             }
         }
@@ -225,10 +209,6 @@ pub(crate) fn process_pending_public_key_infos(state: Rc<RefCell<PokerState>>) {
             return;
         }
 
-        info!(
-            "Processing {} pending public key info messages",
-            s.pending_public_key_infos.len()
-        );
         std::mem::take(&mut s.pending_public_key_infos)
     };
 
@@ -261,9 +241,6 @@ fn handle_public_key_info_received(
         let mut s = state.borrow_mut();
 
         if s.my_id.is_none() || s.my_player.is_none() {
-            info!(
-                "Local player is not ready yet; queuing received public key info from peer"
-            );
             s.pending_public_key_infos.push((
                 peer_connection.clone(),
                 data_channel.clone(),
@@ -294,14 +271,11 @@ fn handle_public_key_info_received(
 
             let new_player_id = public_key_info.player_id;
 
-            info!("Number of players: {:?}", s.num_players_connected);
 
             match CardProtocol::verify_key_ownership(&s.pp, &pk_val, &name.as_bytes(), &proof_val) {
                 Ok(_) => {
                     // Update existing player entry instead of inserting a new one
                     let peer_id = get_peer_id(data_channel.clone());
-                    info!("Peer id: {:?}", peer_id);
-                    info!("Players info: {:?}", s.players_info);
                     if let Some(player_info) = s.players_info.get_mut(&peer_id) {
                         player_info.name = Some(name.clone());
                         player_info.id = Some(new_player_id);
@@ -361,21 +335,33 @@ fn handle_public_key_info_received(
 
                 match CardProtocol::compute_aggregate_key(&pp, &s.pk_proof_info_array) {
                     Ok(aggregate_key) => {
+                        // El pool de precompute solo es válido para el `joint_pk` vigente.
+                        // Si entra una clave NUEVA (re-agregación / nuevo jugador),
+                        // invalidamos el pool. Si es la misma (p. ej. tras un reset que
+                        // conserva la clave) NO lo tocamos. El re-llenado lo dispara JS vía
+                        // el callback `set_joint_pk`. Ver docs/precompute-pool-refill-plan.md.
+                        if s.joint_pk.as_ref() != Some(&aggregate_key) {
+                            s.precompute_pool = Vec::new();
+                        }
                         s.joint_pk = Some(aggregate_key);
+                        // Head start del pool DESDE RUST, en el mismo instante en
+                        // que el joint_pk queda fijado: el callback JS de abajo
+                        // solo AGENDA un fill asíncrono que no corre hasta que el
+                        // main se libere — demasiado tarde para el primer shuffle.
+                        // El spawn corre en un worker (no bloquea) y es no-op si
+                        // los artefactos aún no están cargados (JS los pre-carga
+                        // al inicializar el wasm) o si ya hay un relleno en vuelo.
+                        crate::common::spawn_background_precompute(&*s);
                         let set_joint_pk_clone = s.set_joint_pk.clone();
                         let _ = set_joint_pk_clone.call1(
                             &JsValue::NULL,
                             &JsValue::from_str(&aggregate_key.to_string()),
                         );
-                        info!("Joint public key: {:?}", aggregate_key.to_string());
 
                         if s.deck.is_none() {
                             if let Some(pending_cards) = s.pending_initial_cards.take() {
                                 match initialize_deck_from_cards(&mut *s, &pending_cards) {
                                     Ok(()) => {
-                                        info!(
-                                            "Initialized pending encoded cards after joint public key became available"
-                                        );
                                         try_process_pending_shuffle_verification(
                                             &mut *s,
                                             "joint public key initialized",
@@ -412,11 +398,82 @@ fn handle_public_key_info_received(
     // This allows any incoming messages from dealt_cards to be processed
     if should_deal_cards && is_dealer_check {
         info!("All players connected, starting game");
-        // Take a new borrow just for dealt_cards
-        let mut s = state.borrow_mut();
-        dealt_cards(&mut *s);
-        // Borrow is released here
+        // El reparto del dealer incluye su shuffle (dentro de `dealt_cards`), que
+        // consume una entrada del pool de precompute. Si lo llamáramos aquí
+        // síncrono, el pool estaría SIEMPRE vacío (la generación de fondo acaba de
+        // arrancar con el joint_pk) y caeríamos al hot-gen (~6-8 s bloqueando el
+        // main). Lo diferimos hasta que haya una entrada lista, con tope de espera.
+        schedule_dealt_cards_when_pool_ready(state);
     }
+}
+
+/// Espera (sin bloquear el hilo principal) a que el pool de precompute tenga al
+/// menos una entrada antes de que el dealer reparta y baraje, con un tope de
+/// espera. El shuffle inicial era el único consumidor que SIEMPRE encontraba el
+/// pool vacío: corría en el mismo handler síncrono que fija `joint_pk`, antes de
+/// que ninguna generación de fondo pudiera terminar. Al diferirlo:
+///   - el dealer paga solo el residual (~1 s) en vez del hot-gen (~6-8 s
+///     bloqueantes);
+///   - la UI sigue receptiva durante la espera (el prove corre en workers);
+///   - si algo falla (artefactos sin cargar, worker caído), el tope de espera
+///     recupera el comportamiento anterior (hot-gen síncrono dentro de
+///     `dealt_cards` → `take_or_make_precompute`).
+pub(crate) fn schedule_dealt_cards_when_pool_ready(state: Rc<RefCell<PokerState>>) {
+    const POLL_MS: i32 = 200;
+    const MAX_WAIT_MS: f64 = 30_000.0;
+    wasm_bindgen_futures::spawn_local(async move {
+        let t0 = now_ms();
+        loop {
+            {
+                let mut s = state.borrow_mut();
+                crate::common::drain_ready_into_pool(&mut s);
+                if !s.precompute_pool.is_empty() {
+                    info!(
+                        "[deal] pool de precompute listo tras {:.0} ms; repartiendo",
+                        now_ms() - t0
+                    );
+                    break;
+                }
+                // Re-dispara por si el spawn de la agregación no pudo arrancar
+                // (p. ej. artefactos aún descargándose). No-op si ya hay uno en vuelo.
+                crate::common::spawn_background_precompute(&*s);
+            }
+            if now_ms() - t0 > MAX_WAIT_MS {
+                warn!(
+                    "[deal] tope de espera del pool ({:.0} ms) alcanzado; \
+                     repartiendo con fallback en caliente",
+                    MAX_WAIT_MS
+                );
+                break;
+            }
+            sleep_ms(POLL_MS).await;
+        }
+        let mut s = state.borrow_mut();
+        if let Err(e) = dealt_cards(&mut *s) {
+            error!("dealt_cards (diferido) failed: {:?}", e);
+        }
+    });
+}
+
+/// `setTimeout` como Future. Solo tiene sentido en el hilo principal (donde
+/// existe `window`); si no hay `window`, resuelve inmediatamente para no colgar.
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        match web_sys::window() {
+            Some(win) => {
+                if win
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+                    .is_err()
+                {
+                    let _ = resolve.call0(&JsValue::NULL);
+                }
+            }
+            None => {
+                let _ = resolve.call0(&JsValue::NULL);
+            }
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 // fn handle_player_id_received(
@@ -424,7 +481,6 @@ fn handle_public_key_info_received(
 //     peer_connection: RtcPeerConnection,
 //     player_id: u8,
 // ) {
-//     info!("Setting player id {} for peer", player_id);
 //     let peer_id = get_peer_id(peer_connection);
 
 //     let mut s = state.borrow_mut();
@@ -462,12 +518,39 @@ fn initialize_deck_from_cards(
             .collect::<Vec<MaskedCard>>(),
     );
 
+    // El `card_mapping` (punto de curva enmascarado → carta clásica) es determinista
+    // a partir de la misma lista de cartas, así que lo reconstruimos junto al mazo.
+    // Sin esto, tras un reinicio que borró `card_mapping`, el handler de reveal tokens
+    // hace `card_mapping.expect(...)` y entra en pánico ("Card mapping should be set").
+    s.card_mapping = Some(encode_cards_ext(list_of_cards.to_vec()));
+
     Ok(())
 }
 
 fn try_process_pending_shuffle_verification(s: &mut PokerState, reason: &str) {
     if !s.is_all_public_shuffle_bytes_received || s.proof_shuffle_bytes.is_empty() {
         return;
+    }
+
+    // Recuperación de la carrera de reinicio: si el mazo está vacío pero tenemos
+    // la clave conjunta y las cartas iniciales cacheadas, lo reconstruimos de forma
+    // determinista (masking r=1) en lugar de quedar colgados. Esto cubre el caso en
+    // el que el reset local borró el mazo que el dealer ya había repartido para la
+    // mano siguiente; el canal P2P es ordenado, así que `last_initial_cards` ya
+    // refleja las cartas de ESTA prueba de shuffle.
+    if s.deck.is_none() && s.joint_pk.is_some() {
+        if let Some(cards) = s.last_initial_cards.clone() {
+            match initialize_deck_from_cards(s, &cards) {
+                Ok(()) => info!(
+                    "Rebuilt deck from cached initial cards before shuffle verification ({})",
+                    reason
+                ),
+                Err(e) => error!(
+                    "Failed to rebuild deck from cached initial cards ({}): {:?}",
+                    reason, e
+                ),
+            }
+        }
     }
 
     if s.deck.is_none() {
@@ -502,8 +585,12 @@ fn handle_encoded_cards_received(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut s = state.borrow_mut();
 
-    info!("Got encoded cards");
     let list_of_cards = deserialize_canonical::<Vec<Card>>(&encoded_cards)?;
+
+    // Guardamos las cartas iniciales del juego en curso ANTES de cualquier rama.
+    // Sirven para reconstruir `deck` de forma determinista si un reset local borra
+    // el mazo justo después de que el dealer haya repartido la mano siguiente.
+    s.last_initial_cards = Some(list_of_cards.clone());
 
     let cards_string = list_of_cards
         .iter()
@@ -558,7 +645,6 @@ fn handle_shuffled_and_remasked_cards_received(
 
     let mut s = state.borrow_mut();
 
-    info!("Got shuffled and remasked cards");
     let remasked_cards = deserialize_canonical::<Vec<MaskedCard>>(&remasked_bytes)
         .expect("Failed to deserialize remasked cards");
     let proof =
@@ -640,23 +726,10 @@ fn handle_shuffled_and_remasked_cards_received(
                                 let new_token2_rc =
                                     (new_token2.0, Rc::new(new_token2.1), new_token2.2);
 
-                                info!("Pushing reveal tokens to player {}", i);
 
                                 player_info.reveal_tokens[0].push(new_token1_rc);
                                 player_info.reveal_tokens[1].push(new_token2_rc);
 
-                                info!(
-                                    "send Reveal token 1 from {:?} to {:?}: {:?}",
-                                    my_id,
-                                    i,
-                                    reveal_token1.0 .0.to_string()
-                                );
-                                info!(
-                                    "send Reveal token 2 from {:?} to {:?}: {:?}",
-                                    my_id,
-                                    i,
-                                    reveal_token2.0 .0.to_string()
-                                );
 
                                 let message = ProtocolMessage::RevealToken(
                                     i as u8,
@@ -714,11 +787,9 @@ fn handle_reveal_token_received(
         if let Ok(my_id) = my_id_str.parse::<u8>() {
             let idx1 = (my_id as usize) * 2 + 5;
             let idx2 = (my_id as usize) * 2 + 1 + 5;
-            info!("DEBUG: handle_reveal_token_received - My ID: {}, Potential card indices: {} and {} (deck len: {})", my_id, idx1, idx2, deck.len());
         }
     }
 
-    info!("Got reveal token");
     let reveal_token1 =
         deserialize_canonical::<(RevealToken, RevealProof, PublicKey)>(&reveal_token1_bytes)
             .expect(ERROR_DESERIALIZE_REVEAL_TOKEN_FAILED);
@@ -742,8 +813,6 @@ fn handle_reveal_token_received(
     {
         match find_player_by_id(&mut s.players_info, id) {
             Some((_, player_info)) => {
-                info!("Received reveal token from player {}", id);
-                info!("Received reveal token from player {}", id);
                 player_info.reveal_tokens[0].push(reveal_token1_rc.clone());
                 player_info.reveal_tokens[1].push(reveal_token2_rc.clone());
 
@@ -848,7 +917,6 @@ fn handle_reveal_token_received(
                                         id, e
                                     );
                                 } else {
-                                    info!("Successfully sent cards to frontend for player {}", id);
                                 }
                             }
                             Err(e) => {
@@ -875,10 +943,6 @@ fn handle_reveal_token_received(
     }
 
     if DEBUG_MODE {
-        info!(
-            "Received reveal token 1 length: {:?}",
-            s.received_reveal_tokens1.len()
-        );
     }
     s.received_reveal_tokens1.push((
         id,
@@ -968,9 +1032,6 @@ fn handle_reveal_token_received(
         // Check if both cards were successfully peeked
         match (card1_result, card2_result) {
             (Ok(card1), Ok(card2)) => {
-                info!("Card 1: {:?}", card1);
-                info!("Card 2: {:?}", card2);
-                info!("Both cards revealed successfully");
                 let set_private_cards_clone = s.set_private_cards.clone();
 
                 let cards_array = js_sys::Array::new();
@@ -1102,15 +1163,9 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
 
     // DEBUG: Log deck and mappings
     if let Some(deck) = &s.deck {
-        info!(
-            "DEBUG: deck by index: {:?}",
-            deck.iter().map(|c| c.0.to_string()).collect::<Vec<_>>()
-        );
     }
     if let Some(map) = &s.card_mapping {
-        info!("DEBUG: card_mapping keys count: {}", map.len());
         for (k, v) in map.iter() {
-            info!("DEBUG: mapping {} -> {:?}", k.0.to_string(), v);
         }
     }
 
@@ -1217,34 +1272,14 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
                 .add_input("cardsSuit", suit as u64);
         }
 
-        info!(
-            "Prepared inputs for chair {} (circuit slot {}): {:?}",
-            if slot_has_player {
-                chair_id.to_string()
-            } else {
-                "EMPTY".to_string()
-            },
-            i,
-            hand_cards
-        );
-        info!(
-            "DEBUG: Numeric inputs for circuit slot {} - Ranks: {:?}, Suits: {:?}",
-            i, numeric_inputs_rank, numeric_inputs_suit
-        );
     }
 
     // Generate proof
     match s.provers.prover_calculate_winners.generate_proof() {
         Ok((public_inputs, proof)) => {
-            info!("Successfully generated score calculation proof");
 
             // DEBUG: Print public signals
             let public_strs: Vec<String> = public_inputs.iter().map(|fr| fr.to_string()).collect();
-            info!(
-                "DEBUG: public_signals (len={}): {:?}",
-                public_strs.len(),
-                public_strs
-            );
 
             let (public_js, proof_js) = format_proof_for_js(&public_inputs, &proof);
 
@@ -1254,7 +1289,6 @@ fn calculate_and_send_scores(state: Rc<RefCell<PokerState>>) {
             if let Err(e) = set_players_scores.call2(&JsValue::NULL, &public_js, &proof_js) {
                 error!("set_players_scores callback failed: {:?}", e);
             } else {
-                info!("Successfully sent scores to frontend");
             }
             if let Err(e) = s
                 .provers
@@ -1352,13 +1386,6 @@ fn check_and_send_all_tokens(s: &mut PokerState) {
         send_all_tokens(s);
         s.all_tokens_sent = true;
     } else {
-        info!(
-            "Dealer: Conditions not met yet: received={} (need {}), sent={} (need {})",
-            s.received_reveal_tokens2.len(),
-            s.num_players_connected - 1,
-            players_with_tokens,
-            expected_players
-        );
     }
 }
 
@@ -1467,7 +1494,6 @@ fn send_all_tokens(s: &PokerState) {
     {
         error!("send_all_reveal_tokens callback failed: {:?}", e);
     } else {
-        info!("Successfully sent all reveal tokens to frontend in matrix format");
     }
 }
 
@@ -1500,10 +1526,6 @@ fn send_encrypted_cards(deck: &[MaskedCard], set_encrypted_cards: &js_sys::Funct
     if let Err(e) = set_encrypted_cards.call1(&JsValue::NULL, &cards_array) {
         error!("set_encrypted_cards callback failed: {:?}", e);
     } else {
-        info!(
-            "Successfully sent encrypted cards to frontend ({} cards)",
-            deck.len()
-        );
     }
 }
 
@@ -1534,7 +1556,6 @@ fn handle_reveal_token_community_cards_received(
 
     let mut s = state.borrow_mut();
 
-    info!("Got reveal token community cards");
     // Deserialize each reveal token individually
 
     // Accumulate all revealed cards to send them all at once
@@ -1580,7 +1601,6 @@ fn handle_reveal_token_community_cards_received(
                         .collect();
                     match open_card(&pp, &tokens_for_open, &card_mapping, &deck[index]) {
                         Ok(card) => {
-                            info!("Community Card{:?}: {:?}", index, card);
                             // Store revealed community card
                             s.revealed_community_cards[index] = Some(card);
                             // Accumulate instead of sending immediately
@@ -1635,7 +1655,6 @@ fn handle_reveal_all_cards_received(
 
     let mut s = state.borrow_mut();
 
-    info!("Got reveal all cards");
 
     let mut rng = StdRng::from_entropy();
     let player = s.my_player.as_mut().expect(ERROR_PLAYER_NOT_SET);
@@ -1680,7 +1699,6 @@ fn handle_zk_proof_remove_and_remask_chunk_received(
 ) {
     let mut s = state.borrow_mut();
 
-    info!("Got zk proof remove and remask chunk");
     s.public_reshuffle_bytes.push((i, chunk));
 
     if s.public_reshuffle_bytes.len() == length as usize {
@@ -1826,26 +1844,15 @@ pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Re
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {:?}", e)))?;
 
     let mut errors = Vec::new();
-    info!(
-        "📤 Sending protocol message to {} players",
-        s.players_info.len()
-    );
-    info!("📝 Message type: {:?}", std::mem::discriminant(&message));
 
     // Send to all connected players
     for (peer_id, player_info) in &s.players_info {
-        info!("🎯 Attempting to send to player (peer: {})", peer_id);
-        info!(
-            "📊 Data channel state: {:?}",
-            player_info.data_channel.ready_state()
-        );
 
         if player_info.data_channel.ready_state() == web_sys::RtcDataChannelState::Open {
             if let Err(e) = player_info.data_channel.send_with_str(&serialized_message) {
                 error!("❌ Error sending to player {}: {:?}", peer_id, e);
                 errors.push(format!("Error sending to player {}: {:?}", peer_id, e));
             } else {
-                info!("✅ Message sent successfully to player {}", peer_id);
             }
         } else {
             warn!(
@@ -1868,10 +1875,6 @@ pub fn send_protocol_message(s: &mut PokerState, message: ProtocolMessage) -> Re
             errors
         )));
     }
-    info!(
-        "✅ ProtocolMessage sent successfully to all players: {:?}",
-        message
-    );
     Ok(())
 }
 
@@ -1968,6 +1971,7 @@ pub fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
     let mut rng = StdRng::from_entropy();
     let list_of_cards = generate_list_of_cards(&mut rng, NUM_OF_CARDS);
     let card_mapping = encode_cards_ext(list_of_cards.clone());
+    s.last_initial_cards = Some(list_of_cards.clone());
 
     let card_mapping_bytes = serialize_canonical(&list_of_cards)?;
     if let Err(e) =
@@ -2004,7 +2008,6 @@ pub fn dealt_cards(s: &mut PokerState) -> Result<(), Box<dyn Error>> {
         .collect::<Vec<MaskedCard>>();
 
     if DEBUG_MODE {
-        info!("Initial deck:");
         // for card in deck.as_ref().expect(ERROR_DECK_NOT_SET).iter() {
         //     info!("{:?}", card.0.to_string());
         // }
@@ -2037,12 +2040,28 @@ fn build_precompute_entry_with_key(
     s: &PokerState,
     shared_key: &PublicKey,
 ) -> Result<PrecomputeEntry, Box<dyn Error>> {
-    let pp = s.pp.clone();
     let artifacts = s
         .precompute_artifacts
         .as_ref()
         .ok_or("precompute artifacts not set")?;
+    // Delegamos en el núcleo Send-safe (mismo código para el fallback en-caliente y
+    // la generación de fondo en worker, para no divergir). `artifacts` (`&Arc`) se
+    // deref-coerciona a `&PrecomputeArtifacts`.
+    build_precompute_entry_parts(&s.pp, shared_key, artifacts).map_err(|e| e.into())
+}
 
+/// Núcleo del precompute **Send-safe**: SIN `&PokerState`, solo datos propios /
+/// referencias a datos propios de la closure, para poder correr dentro de
+/// `rayon::spawn` (un Web Worker, que NO ve el `thread_local POKER_STATE`). Genera
+/// `r_prime` (52 escalares < 2^100) + `link_v` (32 B CSPRNG, #1) y prueba el
+/// cp_link de background. Error en `String` (Send: `Box<dyn Error>` no es Send y no
+/// cruzaría el buzón worker->main). El caller pasa `pp`+`shared_key` por referencia
+/// a valores que él posee (clonados del estado) y la PK compartida vía `Arc`.
+pub fn build_precompute_entry_parts(
+    pp: &CardParameters,
+    shared_key: &PublicKey,
+    artifacts: &PrecomputeArtifacts,
+) -> Result<PrecomputeEntry, String> {
     let mut rng = StdRng::from_entropy();
     let max_value: u128 = 2u128.pow(100);
     let r_prime: Vec<Scalar> = (0..52)
@@ -2053,16 +2072,24 @@ fn build_precompute_entry_with_key(
     // que el residual del turno reproduzca el MISMO link_d (enlace cp_link).
     let link_v: [u8; 32] = rng.gen();
 
+    // Witness por grafo si el frontend lo aportó (vacío = intérprete ark-circom).
+    let graph = if artifacts.graph.is_empty() {
+        None
+    } else {
+        Some(artifacts.graph.as_slice())
+    };
     let out = CardProtocol::prove_precompute_lego(
         &r_prime,
-        &pp,
+        pp,
         shared_key,
         &link_v,
         &artifacts.circom_wasm,
         &artifacts.circom_r1cs,
         &artifacts.lego_r1cs,
         &artifacts.lego_pk,
-    )?;
+        graph,
+    )
+    .map_err(|e| format!("prove_precompute_lego failed: {}", e))?;
 
     if !out.verified {
         return Err("precompute proof failed self-verification".into());
@@ -2075,12 +2102,15 @@ fn build_precompute_entry_with_key(
     })
 }
 
-/// Reloj monotónico del navegador en ms (0.0 fuera de un contexto con `window`).
+/// Reloj del navegador en ms. `performance.now()` en el hilo principal; en los
+/// workers de rayon (donde NO hay `window`) cae a `Date::now()`, que sí funciona
+/// en cualquier realm — imprescindible para cronometrar el prove de FONDO del
+/// k-loop, que corre en un worker (sin este fallback daría 0,0 ms).
 pub fn now_ms() -> f64 {
-    web_sys::window()
-        .and_then(|w| w.performance())
-        .map(|p| p.now())
-        .unwrap_or(0.0)
+    if let Some(p) = web_sys::window().and_then(|w| w.performance()) {
+        return p.now();
+    }
+    js_sys::Date::now()
 }
 
 /// BENCH dev del 3.6: mide el coste de generar UNA precompute (witness + prove)
@@ -2101,18 +2131,50 @@ pub fn bench_precompute_entry(s: &PokerState) -> Result<f64, Box<dyn Error>> {
 /// (lento — el camino normal es tenerla pre-generada en background). El residual
 /// del turno DEBE usar el `r_prime`+`link_v_seed` de la entrada devuelta para que
 /// `link_d` enlace con la precompute.
+///
+/// Clave del arreglo: este path corre en el hilo principal (dentro del handler del
+/// turno) y aquí SÍ tenemos el estado prestado, así que:
+///   1. Drenamos el buzón worker->main ANTES de mirar el pool. Los workers de fondo
+///      (`rayon::spawn`) dejan ahí sus entradas; sin este drenado dependeríamos del
+///      lazo JS, que la partida starvea con sus proves síncronos → pool siempre vacío.
+///   2. Tras consumir (o tras el hot-gen), disparamos UNA reposición en background
+///      para el próximo turno, también sin depender de JS.
 fn take_or_make_precompute(s: &mut PokerState) -> Result<PrecomputeEntry, Box<dyn Error>> {
+    // INSTRUMENTACIÓN solape (2026-07-05): ¿hay un prove de FONDO en vuelo justo
+    // cuando el turno va a probar? Es la señal directa de la contención sobre el
+    // ÚNICO pool rayon de 8 workers (idle 4,7 s → 40 s en partida). `SeqCst` para
+    // ver el valor real que otro worker escribió.
+    let inflight_at_turn =
+        s.precompute_inflight.load(std::sync::atomic::Ordering::SeqCst);
+
+    // (1) Recoge lo que algún worker de fondo haya dejado listo en el buzón.
+    crate::common::drain_ready_into_pool(s);
+
     if let Some(entry) = s.precompute_pool.pop() {
-        if DEBUG_MODE {
-            info!(
-                "Consumiendo precompute del pool (quedan {})",
-                s.precompute_pool.len()
-            );
-        }
+        info!(
+            "[timing] take_or_make: POOL-HIT (quedan {}); bg_inflight_al_arrancar={}",
+            s.precompute_pool.len(),
+            inflight_at_turn
+        );
+        // (2) Repone en background para el siguiente turno (no-op si ya hay una en
+        // vuelo). Corre en un worker; solapa con el residual/apuestas, no bloquea.
+        crate::common::spawn_background_precompute(&*s);
         return Ok(entry);
     }
+
     warn!("Pool de precompute vacío: generando en caliente (lento)");
-    build_precompute_entry(s)
+    // Hot-gen síncrono para ESTE turno (usa el pool de rayon en solitario), y solo
+    // DESPUÉS disparamos la reposición de fondo, para no competir con el hot-gen y
+    // que el SIGUIENTE turno ya tire del pool en vez de repetir el hot-gen.
+    let t_hot = now_ms();
+    let entry = build_precompute_entry(s)?;
+    info!(
+        "[timing] take_or_make: HOT-GEN (witness+prove) {:.1} ms; bg_inflight_al_arrancar={}",
+        now_ms() - t_hot,
+        inflight_at_turn
+    );
+    crate::common::spawn_background_precompute(&*s);
+    Ok(entry)
 }
 
 /// Separador de dominio Fiat-Shamir (#5), reconstruible IDENTICO por prover y
@@ -2144,11 +2206,16 @@ fn shuffle_remask_and_send(
 ) -> Result<Vec<MaskedCard>, Box<dyn Error>> {
     let mut rng = StdRng::from_entropy();
     if DEBUG_MODE {
-        info!("=== DEBUG: Starting shuffle_remask_and_send ===");
         info!("send shuffled and remasked cards");
     }
 
     let permutation = Permutation::new(&mut rng, M * N);
+
+    // Puerta D3: mientras este turno prueba (consumo del pool + residual, y el
+    // hot-gen si el pool está vacío), el k-loop de fondo no arranca entradas
+    // nuevas. El guard baja el flag al salir de la función (también por error).
+    let _turn_guard = crate::common::TurnProvingGuard::new(&s.turn_proving);
+    let t_turn = now_ms();
 
     // Pool de precompute (capa 3.4b paso 3): el residual del turno REUTILIZA el
     // `r_prime` + `link_v_seed` de una entrada precomputada en background, para que
@@ -2162,7 +2229,6 @@ fn shuffle_remask_and_send(
     } = entry;
 
     if DEBUG_MODE {
-        info!("DEBUG: usando {} r_prime del pool", r_prime.len());
     }
 
     // Separador de dominio FS (#5): el MISMO valor en el prove y en la
@@ -2191,10 +2257,6 @@ fn shuffle_remask_and_send(
 
     let lego_proof = prove_output.proof;
     if DEBUG_MODE {
-        info!(
-            "DEBUG: lego shuffle proof generated, {} pubs",
-            lego_proof.pubs.len()
-        );
     }
 
     // Bundle del pool {precompute, residual}: ambas comparten `link_d`. Viaja como
@@ -2249,9 +2311,10 @@ fn shuffle_remask_and_send(
         }
     }
 
-    if DEBUG_MODE {
-        info!("DEBUG: shuffle_remask_and_send (lego) completed successfully");
-    }
+    info!(
+        "[timing] TURNO shuffle completo (take_or_make + residual): {:.1} ms",
+        now_ms() - t_turn
+    );
 
     Ok(shuffled_deck)
 }
@@ -2556,8 +2619,6 @@ fn process_shuffle_verification_body(
             for arg in args {
                 args_array.push(&arg);
             }
-            info!("args_array: {:?}", args_array);
-            info!("args array length: {:?}", args_array.length());
             if let Err(e) = verify_reveal_token_clone.call1(&JsValue::NULL, &args_array) {
                 error!("verify_reveal_token callback failed: {:?}", e);
             }
@@ -2572,7 +2633,6 @@ fn process_shuffle_verification_body(
             let new_token1_rc = (new_token1.0, Rc::new(new_token1.1), new_token1.2);
             let new_token2_rc = (new_token2.0, Rc::new(new_token2.1), new_token2.2);
 
-            info!("Pushing reveal tokens to player {}", i);
 
             match find_player_by_id(&mut s.players_info, i as u8) {
                 Some((_, player_info)) => {
@@ -2586,18 +2646,6 @@ fn process_shuffle_verification_body(
             }
 
             if DEBUG_MODE {
-                info!(
-                    "send Reveal token 1 from {:?} to {:?}: {:?}",
-                    my_id,
-                    i,
-                    reveal_token1.0 .0.to_string()
-                );
-                info!(
-                    "send Reveal token 2 from {:?} to {:?}: {:?}",
-                    my_id,
-                    i,
-                    reveal_token2.0 .0.to_string()
-                );
             }
 
             let reveal_token1_bytes_clone = reveal_token1_bytes.clone();
@@ -2631,8 +2679,6 @@ pub fn verify_remask_for_reshuffle(
 
     let public_cards_1 = player_cards[0].clone();
     let public_cards_2 = player_cards[1].clone();
-    info!("player_cards 1: {:?}", public_cards_1.0.to_string());
-    info!("player_cards 2: {:?}", public_cards_2.0.to_string());
     let card_mapping = s.card_mapping.as_ref().expect(ERROR_CARD_MAPPING_NOT_SET);
 
     let m_list = card_mapping.keys().cloned().collect::<Vec<Card>>();
@@ -2677,6 +2723,11 @@ fn send_remask_for_reshuffle(
     player: &InternalPlayer,
     m_list: &Vec<Card>,
 ) -> Result<zk_reshuffle::lego::LegoProofJson, Box<dyn Error>> {
+    // Puerta D3: igual que en el shuffle — sin entradas de fondo nuevas mientras
+    // el residual del reshuffle está en el main.
+    let _turn_guard = crate::common::TurnProvingGuard::new(&s.turn_proving);
+    let t_turn = now_ms();
+
     // Pool de precompute: el residual del reshuffle reutiliza el `r_prime` +
     // `link_v_seed` de una entrada precomputada para enlazar `link_d`. Fallback en
     // caliente si el pool está vacío.
@@ -2729,6 +2780,11 @@ fn send_remask_for_reshuffle(
         error!("Error sending lego reshuffle bundle: {:?}", e);
         return Err(format!("{:?}", e).into());
     }
+
+    info!(
+        "[timing] TURNO reshuffle completo (take_or_make + residual): {:.1} ms",
+        now_ms() - t_turn
+    );
 
     // Devuelve el residual para la verificación/reconstrucción local del propio
     // jugador (el bundle ya viajó a los peers).

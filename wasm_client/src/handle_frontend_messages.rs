@@ -320,10 +320,6 @@ pub fn reveal_private_cards_players(state: Rc<RefCell<PokerState>>) {
     if let Err(e) = send_protocol_message(&mut *s, message) {
         error!("Error sending own reveal tokens: {:?}", e);
     } else {
-        info!(
-            "Successfully sent own reveal tokens from player {} to all players",
-            my_id
-        );
     }
 }
 
